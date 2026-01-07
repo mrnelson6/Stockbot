@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tree:*)",
+      "Bash(git -C \"C:\\\\Users\\\\nelly\\\\Documents\\\\Stockbot\" log --oneline -10)",
+      "Bash(dir /ah \"C:\\\\Users\\\\nelly\\\\Documents\\\\Stockbot\")",
+      "Bash(git -C \"C:\\\\Users\\\\nelly\\\\Documents\\\\Stockbot\" config --list)",
+      "Bash(git -C \"C:\\\\Users\\\\nelly\\\\Documents\\\\Stockbot\" status)",
+      "Bash(git -C \"C:\\\\Users\\\\nelly\\\\Documents\\\\Stockbot\" log --all --oneline)",
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(python -c:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(python scripts/train_portfolio.py:*)",
+      "Bash(python scripts/live_portfolio.py:*)"
+    ]
+  }
+}
