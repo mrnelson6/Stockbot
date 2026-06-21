@@ -47,8 +47,11 @@ class LivePortfolioTrader:
         data_dir: Path,
         capital: float = 100_000.0,
         execute_trades: bool = False,
-        continue_learning: bool = False,
-        max_position_value: float = 20_000.0,  # Max $ per position
+        continue_learning: bool = True,  # Default ON
+        max_position_value: float = 20_000.0,  # Max $ per long position
+        max_short_value: float = 20_000.0,  # Max $ per short position
+        feed: str = "iex",  # "iex" (free, default) or "sip" (paid)
+        allow_shorting: bool = False,  # Whether to allow short positions
     ) -> None:
         self._symbols = symbols
         self._agent_path = agent_path
@@ -57,6 +60,9 @@ class LivePortfolioTrader:
         self._execute = execute_trades
         self._learn = continue_learning
         self._max_position = max_position_value
+        self._max_short = max_short_value
+        self._feed = feed
+        self._allow_shorting = allow_shorting
 
         # Load settings
         self._settings = load_settings()
@@ -64,7 +70,7 @@ class LivePortfolioTrader:
             raise ValueError("Alpaca credentials not configured")
 
         # Initialize components
-        self._data_provider = AlpacaDataProvider(self._settings.alpaca)
+        self._data_provider = AlpacaDataProvider(self._settings.alpaca, feed=feed)
         self._broker = AlpacaBroker(self._settings.alpaca) if execute_trades else None
 
         # Feature extractor
@@ -139,7 +145,7 @@ class LivePortfolioTrader:
     def _load_historical(self) -> None:
         """Load historical bars for all symbols."""
         end = datetime.now(timezone.utc)
-        start = end - timedelta(days=30)  # 30 days should be enough
+        start = end - timedelta(days=90)  # 90 days lookback
 
         start_ts = Timestamp(int(start.timestamp() * 1_000_000_000))
         end_ts = Timestamp(int(end.timestamp() * 1_000_000_000))
@@ -148,30 +154,37 @@ class LivePortfolioTrader:
 
         for i, symbol in enumerate(self._symbols, 1):
             sym = Symbol(symbol)
+            cache_hit = False
 
-            # Try cache first
-            try:
-                cached = list(load_bars(self._data_dir, sym, Timeframe.DAY_1))
-                recent = [b for b in cached if b.timestamp >= start_ts]
-                if len(recent) >= 20:
-                    self._bars[symbol] = recent
-                    continue
-            except Exception:
-                pass
+            # Try cache first - check both minute and daily data
+            for timeframe in [Timeframe.MINUTE_1, Timeframe.DAY_1]:
+                try:
+                    cached = list(load_bars(self._data_dir, sym, timeframe))
+                    if len(cached) >= 60:
+                        # Use most recent bars
+                        self._bars[symbol] = cached[-200:]
+                        cache_hit = True
+                        break
+                except Exception:
+                    pass
 
-            # Fetch
-            try:
-                bars = list(self._data_provider.get_bars(
-                    sym, start_ts, end_ts, Timeframe.DAY_1
-                ))
-                self._bars[symbol] = bars
-            except Exception as e:
-                logger.warning(f"Failed to get history for {symbol}: {e}")
+            # If no cache hit, try to fetch daily data
+            if symbol not in self._bars or len(self._bars[symbol]) < 60:
+                try:
+                    bars = list(self._data_provider.get_bars(
+                        sym, start_ts, end_ts, Timeframe.DAY_1
+                    ))
+                    if len(bars) >= 20:
+                        self._bars[symbol] = bars
+                except Exception as e:
+                    logger.warning(f"Failed to get history for {symbol}: {e}")
 
-            if i % 20 == 0:
-                print(f"  Loaded {i}/{len(self._symbols)}...")
+            if i % 5 == 0 or i <= 5:
+                status = "cache" if cache_hit else "fetched"
+                bars_count = len(self._bars.get(symbol, []))
+                print(f"  Loaded {i}/{len(self._symbols)} ({symbol}: {bars_count} bars, {status})...", flush=True)
 
-        loaded = sum(1 for bars in self._bars.values() if len(bars) >= 20)
+        loaded = sum(1 for bars in self._bars.values() if len(bars) >= 60)
         print(f"Loaded history for {loaded}/{len(self._symbols)} symbols")
 
     def _get_current_prices(self) -> dict[str, float]:
@@ -259,73 +272,238 @@ class LivePortfolioTrader:
         prices: dict[str, float],
         account_value: float,
     ) -> None:
-        """Rebalance portfolio to target allocations."""
+        """Rebalance portfolio to target allocations with buying power awareness.
+
+        Handles both long and short positions with proper margin management:
+        1. First close positions (sell longs, cover shorts) - frees up capital
+        2. Then open new positions (buy longs, sell shorts) - uses capital
+        """
         current_positions = self._get_current_positions()
 
-        trades_needed = []
+        # Categorize trades by type
+        close_longs = []    # Sell shares we own (frees cash)
+        cover_shorts = []   # Buy to cover short positions (uses cash, frees margin)
+        open_longs = []     # Buy new long positions (uses cash)
+        open_shorts = []    # Sell short (uses margin)
+
         for symbol in self._symbols:
             if symbol not in prices or symbol not in target_allocations:
                 continue
 
             target_value = target_allocations[symbol] * account_value
-            target_value = np.clip(target_value, -self._max_position, self._max_position)
+
+            # If shorting not allowed, treat negative targets as 0 (flat)
+            if not self._allow_shorting and target_value < 0:
+                target_value = 0
+
+            # Clip to max position limits (long and short separately)
+            if target_value > 0:
+                target_value = min(target_value, self._max_position)
+            else:
+                target_value = max(target_value, -self._max_short)
+
             target_shares = int(target_value / prices[symbol]) if prices[symbol] > 0 else 0
 
             current_shares, _ = current_positions.get(symbol, (0, 0.0))
             delta = target_shares - current_shares
 
-            if abs(delta) >= 1:
-                trades_needed.append({
-                    "symbol": symbol,
-                    "current": current_shares,
-                    "target": target_shares,
-                    "delta": delta,
-                    "price": prices[symbol],
-                    "value": abs(delta) * prices[symbol],
-                })
+            if abs(delta) < 1:
+                continue
 
-        if not trades_needed:
+            trade = {
+                "symbol": symbol,
+                "current": current_shares,
+                "target": target_shares,
+                "delta": delta,
+                "price": prices[symbol],
+                "value": abs(delta) * prices[symbol],
+            }
+
+            if current_shares > 0:
+                # Currently LONG
+                if delta < 0:
+                    # Reduce or close long position
+                    sell_qty = min(abs(delta), current_shares)
+                    trade["delta"] = -sell_qty
+                    trade["value"] = sell_qty * prices[symbol]
+                    close_longs.append(trade)
+
+                    # If target is negative, we also need to open a short after closing
+                    if target_shares < 0 and self._allow_shorting:
+                        short_trade = trade.copy()
+                        short_trade["delta"] = target_shares  # negative
+                        short_trade["value"] = abs(target_shares) * prices[symbol]
+                        open_shorts.append(short_trade)
+                else:
+                    # Increase long position
+                    open_longs.append(trade)
+
+            elif current_shares < 0:
+                # Currently SHORT
+                if delta > 0:
+                    # Reduce or close short position (buy to cover)
+                    cover_qty = min(delta, abs(current_shares))
+                    trade["delta"] = cover_qty
+                    trade["value"] = cover_qty * prices[symbol]
+                    cover_shorts.append(trade)
+
+                    # If target is positive, we also need to open a long after covering
+                    if target_shares > 0:
+                        long_trade = trade.copy()
+                        long_trade["delta"] = target_shares
+                        long_trade["value"] = target_shares * prices[symbol]
+                        open_longs.append(long_trade)
+                else:
+                    # Increase short position
+                    if self._allow_shorting:
+                        open_shorts.append(trade)
+            else:
+                # Currently FLAT
+                if delta > 0:
+                    open_longs.append(trade)
+                elif delta < 0 and self._allow_shorting:
+                    open_shorts.append(trade)
+
+        total_trades = len(close_longs) + len(cover_shorts) + len(open_longs) + len(open_shorts)
+        if total_trades == 0:
             return
 
-        # Sort by value (largest trades first)
-        trades_needed.sort(key=lambda x: x["value"], reverse=True)
-
-        print(f"\n  Rebalancing {len(trades_needed)} positions:")
-        for trade in trades_needed[:10]:  # Show top 10
-            action = "BUY" if trade["delta"] > 0 else "SELL"
-            print(f"    {trade['symbol']:6} {action:4} {abs(trade['delta']):4} "
-                  f"shares @ ${trade['price']:.2f} (${trade['value']:.0f})")
-
-        if len(trades_needed) > 10:
-            print(f"    ... and {len(trades_needed) - 10} more")
+        print(f"\n  Rebalancing: {len(close_longs)} close longs, {len(cover_shorts)} cover shorts, "
+              f"{len(open_longs)} open longs, {len(open_shorts)} open shorts")
 
         if not self._execute or not self._broker:
             # Simulate
-            for trade in trades_needed:
-                self._positions[trade["symbol"]] = trade["target"]
-                self._position_values[trade["symbol"]] = trade["target"] * trade["price"]
+            for trades in [close_longs, cover_shorts, open_longs, open_shorts]:
+                for trade in trades:
+                    self._positions[trade["symbol"]] = trade["target"]
+                    self._position_values[trade["symbol"]] = trade["target"] * trade["price"]
             return
 
-        # Execute trades
         from stockbot.core.models import Order
         from stockbot.core.types import OrderSide, OrderType
 
-        for trade in trades_needed:
-            try:
-                side = OrderSide.BUY if trade["delta"] > 0 else OrderSide.SELL
-                order = Order(
-                    symbol=Symbol(trade["symbol"]),
-                    side=side,
-                    quantity=Quantity(Decimal(abs(trade["delta"]))),
-                    order_type=OrderType.MARKET,
-                    timestamp=Timestamp(int(time.time() * 1_000_000_000)),
-                )
-                self._broker.submit_order(order)
-                action = "BOUGHT" if trade["delta"] > 0 else "SOLD"
-                print(f"    EXECUTED: {action} {abs(trade['delta'])} {trade['symbol']}")
+        # Step 1: Close positions first (frees up capital/margin)
+        if close_longs:
+            print("  Closing long positions...")
+            for trade in sorted(close_longs, key=lambda x: x["value"], reverse=True):
+                try:
+                    order = Order(
+                        symbol=Symbol(trade["symbol"]),
+                        side=OrderSide.SELL,
+                        quantity=Quantity(Decimal(abs(trade["delta"]))),
+                        order_type=OrderType.MARKET,
+                        created_at=Timestamp(int(time.time() * 1_000_000_000)),
+                    )
+                    self._broker.submit_order(order)
+                    print(f"    SOLD {abs(trade['delta']):4} {trade['symbol']:6} @ ${trade['price']:.2f}")
+                except Exception as e:
+                    logger.error(f"Failed to close long {trade['symbol']}: {e}")
 
-            except Exception as e:
-                logger.error(f"Failed to execute {trade['symbol']}: {e}")
+        if cover_shorts:
+            print("  Covering short positions...")
+            for trade in sorted(cover_shorts, key=lambda x: x["value"], reverse=True):
+                try:
+                    order = Order(
+                        symbol=Symbol(trade["symbol"]),
+                        side=OrderSide.BUY,
+                        quantity=Quantity(Decimal(trade["delta"])),
+                        order_type=OrderType.MARKET,
+                        created_at=Timestamp(int(time.time() * 1_000_000_000)),
+                    )
+                    self._broker.submit_order(order)
+                    print(f"    COVERED {trade['delta']:4} {trade['symbol']:6} @ ${trade['price']:.2f}")
+                except Exception as e:
+                    logger.error(f"Failed to cover short {trade['symbol']}: {e}")
+
+        # Wait for closes to settle
+        if (close_longs or cover_shorts) and (open_longs or open_shorts):
+            print("  Waiting for closes to settle...")
+            time.sleep(2)
+
+        # Step 2: Get updated buying power
+        try:
+            buying_power = float(self._broker.get_buying_power())
+        except Exception:
+            buying_power = 0.0
+
+        print(f"  Available buying power: ${buying_power:,.2f}")
+
+        # If no buying power, skip opening new positions
+        if buying_power < 100:
+            if open_longs or open_shorts:
+                print("  WARNING: No buying power available - skipping new positions")
+                print("  (Close some positions to free up capital)")
+            return
+
+        # Step 3: Open new long positions
+        if open_longs:
+            print("  Opening long positions...")
+            spent = 0.0
+            for trade in sorted(open_longs, key=lambda x: x["value"], reverse=True):
+                cost = trade["value"]
+
+                if spent + cost > buying_power * 0.95:
+                    affordable = int((buying_power * 0.95 - spent) / trade["price"])
+                    if affordable < 1:
+                        print(f"    SKIP {trade['symbol']:6} - insufficient buying power")
+                        continue
+                    trade["delta"] = affordable
+                    cost = affordable * trade["price"]
+
+                try:
+                    order = Order(
+                        symbol=Symbol(trade["symbol"]),
+                        side=OrderSide.BUY,
+                        quantity=Quantity(Decimal(trade["delta"])),
+                        order_type=OrderType.MARKET,
+                        created_at=Timestamp(int(time.time() * 1_000_000_000)),
+                    )
+                    self._broker.submit_order(order)
+                    spent += cost
+                    print(f"    BOUGHT {trade['delta']:4} {trade['symbol']:6} @ ${trade['price']:.2f} (${cost:.0f})")
+                except Exception as e:
+                    logger.error(f"Failed to buy {trade['symbol']}: {e}")
+
+            if spent > 0:
+                print(f"  Long positions cost: ${spent:,.2f}")
+                buying_power -= spent
+
+        # Step 4: Open new short positions (requires margin)
+        if open_shorts and self._allow_shorting:
+            print("  Opening short positions...")
+            margin_used = 0.0
+            # Shorts typically require 50% margin (Reg T) - be conservative
+            margin_available = buying_power * 0.45
+
+            for trade in sorted(open_shorts, key=lambda x: x["value"], reverse=True):
+                margin_required = trade["value"] * 0.5  # 50% margin requirement
+
+                if margin_used + margin_required > margin_available:
+                    # Try smaller position
+                    affordable = int((margin_available - margin_used) * 2 / trade["price"])
+                    if affordable < 1:
+                        print(f"    SKIP {trade['symbol']:6} - insufficient margin")
+                        continue
+                    trade["delta"] = -affordable
+                    margin_required = affordable * trade["price"] * 0.5
+
+                try:
+                    order = Order(
+                        symbol=Symbol(trade["symbol"]),
+                        side=OrderSide.SELL,
+                        quantity=Quantity(Decimal(abs(trade["delta"]))),
+                        order_type=OrderType.MARKET,
+                        created_at=Timestamp(int(time.time() * 1_000_000_000)),
+                    )
+                    self._broker.submit_order(order)
+                    margin_used += margin_required
+                    print(f"    SHORTED {abs(trade['delta']):4} {trade['symbol']:6} @ ${trade['price']:.2f} "
+                          f"(margin: ${margin_required:.0f})")
+                except Exception as e:
+                    logger.error(f"Failed to short {trade['symbol']}: {e}")
+
+            if margin_used > 0:
+                print(f"  Margin used for shorts: ${margin_used:,.2f}")
 
     def _process_tick(self) -> None:
         """Process one tick of market data."""
@@ -408,38 +586,140 @@ class LivePortfolioTrader:
         self._last_features_dict = features_dict
         self._last_allocations = allocations
 
-    def run(self, poll_interval: float = 60.0) -> None:
-        """Run live trading loop."""
+    def _wait_for_market_open(self) -> bool:
+        """Wait for market to open, sleeping efficiently.
+
+        Returns:
+            True if should continue, False if stopped
+        """
+        if not self._broker:
+            return True
+
+        clock = self._broker.get_market_clock()
+        if clock["is_open"]:
+            return True
+
+        next_open = clock.get("next_open")
+        if next_open is None:
+            print("  Could not determine next market open. Waiting 1 hour...")
+            for _ in range(60):  # Check every minute for 1 hour
+                if not self._running:
+                    return False
+                time.sleep(60)
+            return True
+
+        # Calculate sleep time
+        now = datetime.now(timezone.utc)
+        if hasattr(next_open, 'tzinfo') and next_open.tzinfo is None:
+            next_open = next_open.replace(tzinfo=timezone.utc)
+
+        time_until_open = (next_open - now).total_seconds()
+
+        if time_until_open <= 0:
+            return True
+
+        # Wake up 5 minutes early to prepare
+        wake_early_seconds = 300
+        sleep_seconds = max(0, time_until_open - wake_early_seconds)
+
+        # Format for display
+        hours, remainder = divmod(int(time_until_open), 3600)
+        minutes, seconds = divmod(remainder, 60)
+
+        print(f"\n{'=' * 70}")
+        print("MARKET CLOSED")
+        print(f"{'=' * 70}")
+        print(f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+        print(f"Next open:    {next_open.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+        print(f"Time until open: {hours}h {minutes}m {seconds}s")
+        print(f"Sleeping until: {(now + timedelta(seconds=sleep_seconds)).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+        print(f"{'=' * 70}\n")
+
+        # Sleep in chunks so we can respond to stop signals
+        chunk_size = 60  # Check every minute
+        remaining = sleep_seconds
+
+        while remaining > 0 and self._running:
+            sleep_time = min(chunk_size, remaining)
+            time.sleep(sleep_time)
+            remaining -= sleep_time
+
+            # Show progress every 30 minutes
+            if remaining > 0 and int(remaining) % 1800 == 0:
+                hours, remainder = divmod(int(remaining), 3600)
+                minutes, _ = divmod(remainder, 60)
+                print(f"  ... {hours}h {minutes}m until wake up")
+
+        if not self._running:
+            return False
+
+        print("\n" + "=" * 70)
+        print("WAKING UP - Market opens soon!")
+        print("=" * 70 + "\n")
+
+        # Refresh historical data before market opens
+        print("Refreshing historical data...")
+        self._load_historical()
+
+        return True
+
+    def run(self, poll_interval: float = 60.0, run_24_7: bool = True) -> None:
+        """Run live trading loop.
+
+        Args:
+            poll_interval: Seconds between updates when market is open
+            run_24_7: If True, sleep during market close and resume when open
+        """
         self._running = True
         self._setup_signals()
+        error_count = 0
+        max_errors = 10  # Max consecutive errors before longer backoff
 
         print("\n" + "=" * 70)
         print("LIVE PORTFOLIO TRADER")
         print("=" * 70)
         print(f"Symbols: {len(self._symbols)}")
         print(f"Capital: ${self._capital:,.0f}")
-        print(f"Max Position: ${self._max_position:,.0f}")
+        print(f"Max Long: ${self._max_position:,.0f}")
+        print(f"Max Short: ${self._max_short:,.0f}")
         print(f"Execute Trades: {self._execute}")
         print(f"Continue Learning: {self._learn}")
+        print(f"Data Feed: {self._feed.upper()}")
+        print(f"Allow Shorting: {self._allow_shorting}")
+        print(f"24/7 Mode: {run_24_7}")
         print("=" * 70)
 
         self._load_historical()
-
-        if self._broker:
-            if not self._broker.is_market_open():
-                print("\nMarket closed. Will act when open.\n")
-            else:
-                print("\nMarket is OPEN.\n")
-
-        print("\nMonitoring... (Ctrl+C to stop)\n")
+        print("Historical data loaded, entering main loop...", flush=True)
 
         try:
             while self._running:
+                # Check market status
+                print("Checking market status...", flush=True)
+                if self._broker:
+                    print(f"  Calling is_market_open()...", flush=True)
+                    if not self._broker.is_market_open():
+                        if run_24_7:
+                            if not self._wait_for_market_open():
+                                break
+                        else:
+                            print("\nMarket closed. Exiting (use --24-7 to wait).\n")
+                            break
+
+                # Process tick
                 try:
                     self._process_tick()
+                    error_count = 0  # Reset on success
                 except Exception as e:
-                    logger.error(f"Error in tick: {e}")
+                    error_count += 1
+                    logger.error(f"Error in tick ({error_count}/{max_errors}): {e}")
 
+                    if error_count >= max_errors:
+                        print(f"\n{max_errors} consecutive errors. Backing off for 5 minutes...")
+                        time.sleep(300)
+                        error_count = 0
+
+                # Sleep until next tick
                 if self._running:
                     time.sleep(poll_interval)
 
@@ -497,10 +777,11 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    python scripts/live_portfolio.py                    # Monitor 100 stocks
+    python scripts/live_portfolio.py                    # Monitor 100 stocks (learning ON)
     python scripts/live_portfolio.py --universe-size 25 # Monitor 25 stocks
     python scripts/live_portfolio.py --execute          # Execute trades
-    python scripts/live_portfolio.py --train-live       # Keep learning
+    python scripts/live_portfolio.py --no-learn         # Disable live learning
+    python scripts/live_portfolio.py --feed sip         # Use paid SIP data feed
         """,
     )
 
@@ -510,17 +791,28 @@ Examples:
     parser.add_argument("--agent", type=Path, default=Path("./data/portfolio_agent.json"))
     parser.add_argument("--execute", action="store_true",
                         help="Execute trades (paper account)")
-    parser.add_argument("--train-live", action="store_true",
-                        help="Continue learning from live data")
+    parser.add_argument("--no-learn", dest="train_live", action="store_false",
+                        help="Disable live learning (learning is ON by default)")
     parser.add_argument("--capital", type=float, default=100_000.0,
                         help="Trading capital (default: 100000)")
     parser.add_argument("--max-position", type=float, default=20_000.0,
-                        help="Max $ per position (default: 20000)")
+                        help="Max $ per long position (default: 20000)")
+    parser.add_argument("--max-short", type=float, default=20_000.0,
+                        help="Max $ per short position (default: 20000)")
     parser.add_argument("--poll-interval", type=float, default=60.0,
                         help="Seconds between updates (default: 60)")
     parser.add_argument("--data-dir", type=Path, default=Path("./data/portfolio"))
+    parser.add_argument("--feed", type=str, default="iex",
+                        choices=["iex", "sip"],
+                        help="Data feed: iex (free, default) or sip (paid)")
+    parser.add_argument("--allow-shorting", action="store_true",
+                        help="Allow short selling (requires margin account)")
+    parser.add_argument("--24-7", dest="run_24_7", action="store_true",
+                        help="Run 24/7, sleeping when market is closed")
     parser.add_argument("--log-level", type=str, default="WARNING",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+
+    parser.set_defaults(train_live=True)  # Learning ON by default
 
     return parser.parse_args()
 
@@ -531,12 +823,22 @@ def main() -> int:
 
     symbols = get_universe(args.universe_size)
 
+    # Check if paper or live account
+    settings = load_settings()
+    is_paper = settings.alpaca.paper if settings.alpaca else True
+
     if args.execute:
-        print("\n" + "!" * 70)
-        print("WARNING: Execute mode - will place real orders!")
-        print("!" * 70)
-        if input("\nContinue? [y/N]: ").lower() != 'y':
-            return 0
+        if is_paper:
+            print("\n" + "-" * 70)
+            print("Executing trades on PAPER account.")
+            print("-" * 70 + "\n")
+        else:
+            print("\n" + "!" * 70)
+            print("WARNING: Execute mode on LIVE account - real money at risk!")
+            print("!" * 70)
+            if input("\nType 'yes' to confirm: ").lower() != 'yes':
+                print("Aborted.")
+                return 0
 
     try:
         trader = LivePortfolioTrader(
@@ -547,8 +849,11 @@ def main() -> int:
             execute_trades=args.execute,
             continue_learning=args.train_live,
             max_position_value=args.max_position,
+            max_short_value=args.max_short,
+            feed=args.feed,
+            allow_shorting=args.allow_shorting,
         )
-        trader.run(poll_interval=args.poll_interval)
+        trader.run(poll_interval=args.poll_interval, run_24_7=args.run_24_7)
 
     except ValueError as e:
         print(f"Error: {e}")

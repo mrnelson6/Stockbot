@@ -240,7 +240,7 @@ class PortfolioAgent:
                 parts.append(np.zeros(self._feature_extractor.feature_count))
 
         # Portfolio state features
-        positions = np.array([self._current_positions[s] for s in self._symbols])
+        positions = np.array([self._current_positions.get(s, 0.0) for s in self._symbols])
         portfolio_features = np.array([
             np.mean(positions),           # Average position
             np.std(positions),            # Position dispersion

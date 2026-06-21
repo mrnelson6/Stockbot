@@ -29,6 +29,10 @@ dev = [
     "ruff>=0.1.6",
     "pandas-stubs>=2.0.0",
 ]
+web = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+]
 
 [project.scripts]
 stockbot-ingest = "stockbot.scripts.ingest_data:main"

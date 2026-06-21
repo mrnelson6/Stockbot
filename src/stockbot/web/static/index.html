@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Random Bot — Live Portfolio</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1 id="title">Random Bot</h1>
+    <span id="updated" class="muted">loading…</span>
+  </header>
+
+  <section class="cards" id="cards">
+    <div class="card"><div class="label">Portfolio value</div><div class="value" id="equity">—</div></div>
+    <div class="card"><div class="label">Cash</div><div class="value" id="cash">—</div></div>
+    <div class="card"><div class="label">Bot return</div><div class="value" id="botReturn">—</div></div>
+    <div class="card"><div class="label">SPY return</div><div class="value" id="spyReturn">—</div></div>
+    <div class="card"><div class="label">vs SPY</div><div class="value" id="alpha">—</div></div>
+  </section>
+
+  <section class="panel">
+    <h2>Portfolio value vs SPY <span class="muted">(% return since inception)</span></h2>
+    <canvas id="chart" height="110"></canvas>
+  </section>
+
+  <div class="two-col">
+    <section class="panel">
+      <h2>Current positions (<span id="posCount">0</span>)</h2>
+      <table id="positions">
+        <thead><tr><th>Symbol</th><th>Qty</th><th>Avg</th><th>Value</th><th>Unrealized</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>Recent trades</h2>
+      <table id="trades">
+        <thead><tr><th>Time</th><th>Side</th><th>Symbol</th><th>Qty</th><th>Price</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </div>
+
+  <footer class="muted">
+    Read-only. Trades are random by design — this is an experiment, not advice.
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

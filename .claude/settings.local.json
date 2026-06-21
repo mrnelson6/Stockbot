@@ -11,7 +11,12 @@
       "Bash(python -c:*)",
       "Bash(python -m pytest:*)",
       "Bash(python scripts/train_portfolio.py:*)",
-      "Bash(python scripts/live_portfolio.py:*)"
+      "Bash(python scripts/live_portfolio.py:*)",
+      "Bash(dir:*)",
+      "Bash(python scripts/check_account.py:*)",
+      "Bash(timeout:*)",
+      "Bash(ping:*)",
+      "Bash(python -u -c:*)"
     ]
   }
 }

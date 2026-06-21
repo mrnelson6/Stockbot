@@ -226,11 +226,8 @@ class AlpacaBroker:
 
             for pos in alpaca_positions:
                 symbol = Symbol(pos.symbol)
+                # Alpaca already returns negative qty for shorts
                 qty = Decimal(str(pos.qty))
-
-                # Alpaca returns positive qty for long, we use negative for short
-                if pos.side == "short":
-                    qty = -qty
 
                 positions[symbol] = Position(
                     symbol=symbol,
@@ -323,6 +320,24 @@ class AlpacaBroker:
         except Exception as e:
             logger.error(f"Failed to get market clock: {e}")
             return False
+
+    def get_market_clock(self) -> dict:
+        """Get market clock information.
+
+        Returns:
+            Dict with is_open, next_open, next_close timestamps
+        """
+        try:
+            clock = self._client.get_clock()
+            return {
+                "is_open": clock.is_open,
+                "next_open": clock.next_open,
+                "next_close": clock.next_close,
+                "timestamp": clock.timestamp,
+            }
+        except Exception as e:
+            logger.error(f"Failed to get market clock: {e}")
+            return {"is_open": False, "next_open": None, "next_close": None, "timestamp": None}
 
     def get_account_info(self) -> dict:
         """Get account information.
