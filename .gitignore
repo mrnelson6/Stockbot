@@ -46,7 +46,9 @@ htmlcov/
 .env.*.local
 
 # Data files (large, should not be in repo)
-data/
+# NOTE: leading slash anchors this to the repo root so it does NOT match the
+# source package src/stockbot/data/.
+/data/
 *.parquet
 *.csv
 
