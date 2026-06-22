@@ -1,0 +1,9 @@
+[Unit]
+Description=Wake box for the US market open (stockbot)
+
+[Service]
+Type=oneshot
+# The wake itself is done by the timer (WakeSystem=true). This unit just logs a
+# marker and makes sure the trading service is running after resume.
+ExecStart=/usr/bin/logger -t stockbot-wake "Woke for market open"
+ExecStart=/bin/sh -c 'systemctl is-active --quiet stockbot-random || systemctl restart stockbot-random'

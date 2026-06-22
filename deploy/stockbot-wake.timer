@@ -1,0 +1,16 @@
+[Unit]
+Description=Wake box before the US market open (stockbot)
+
+[Timer]
+# Box timezone is America/Los_Angeles. 06:25 PT == 09:25 ET year-round (ET and
+# PT share the same DST transitions), i.e. ~5 min before the 09:30 ET open. That
+# lands inside the keep-awake gate (09:25-16:05 ET) so plex_sleep_blocker.sh
+# grabs the suspend inhibitor on the very next poll and holds it all session.
+OnCalendar=Mon-Fri *-*-* 06:25:00
+# Program the RTC alarm so the machine actually resumes from suspend to run this.
+WakeSystem=true
+AccuracySec=30s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
