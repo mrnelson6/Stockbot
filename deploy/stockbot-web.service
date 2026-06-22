@@ -6,7 +6,7 @@ After=network-online.target
 User=marvin
 WorkingDirectory=/home/marvin/Documents/Stockbot
 Environment=STOCKBOT_WEB_DB=/home/marvin/Documents/Stockbot/data/dashboard.db
-ExecStart=/home/marvin/Documents/Stockbot/.venv/bin/python scripts/serve_web.py --host 127.0.0.1 --port 8000
+ExecStart=/home/marvin/Documents/Stockbot/.venv/bin/python scripts/serve_web.py --host 0.0.0.0 --port 8000
 Restart=on-failure
 RestartSec=10
 
