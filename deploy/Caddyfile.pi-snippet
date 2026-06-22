@@ -1,0 +1,9 @@
+# Add this block to the Raspberry Pi's /etc/caddy/Caddyfile (the Pi is the public
+# ingress; it already serves watch.ttnelson.com -> 192.168.0.240:8096 for Jellyfin).
+# The stockbot dashboard runs on the box at 192.168.0.240:8000 (bound 0.0.0.0).
+# After adding, run on the Pi:  sudo systemctl reload caddy
+# DNS: point this subdomain at the same public IP as watch.ttnelson.com.
+
+stocks.ttnelson.com {
+    reverse_proxy 192.168.0.240:8000
+}
