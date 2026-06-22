@@ -51,7 +51,7 @@ class RandomAllocator:
         min_buys: int = 1,
         max_buys: int = 5,
         deploy_fraction_range: tuple[float, float] = (0.9, 1.0),
-        max_position_value: float = 20_000.0,
+        max_position_fraction: float = 0.2,
         seed: int | None = None,
     ) -> None:
         """Initialize the allocator.
@@ -63,7 +63,9 @@ class RandomAllocator:
             max_buys: Maximum number of names to buy on a trade event.
             deploy_fraction_range: (low, high) uniform range for the fraction of
                 available cash to deploy on a trade event.
-            max_position_value: Hard cap on the dollar value targeted per name.
+            max_position_fraction: Cap on each position as a fraction (0..1) of the
+                account's total value, e.g. 0.2 = no single buy targets more than
+                20% of equity. The dollar cap scales with the account automatically.
             seed: Optional RNG seed for reproducibility.
         """
         if not 0.0 <= trade_prob <= 1.0:
@@ -75,13 +77,15 @@ class RandomAllocator:
         low, high = deploy_fraction_range
         if not 0.0 <= low <= high <= 1.0:
             raise ValueError(f"deploy_fraction_range must be 0<=low<=high<=1, got {deploy_fraction_range}")
+        if not 0.0 < max_position_fraction <= 1.0:
+            raise ValueError(f"max_position_fraction must be in (0, 1], got {max_position_fraction}")
 
         self._trade_prob = trade_prob
         self._churn_sell_prob = churn_sell_prob
         self._min_buys = min_buys
         self._max_buys = max_buys
         self._deploy_low, self._deploy_high = low, high
-        self._max_position_value = max_position_value
+        self._max_position_fraction = max_position_fraction
         self._rng = np.random.default_rng(seed)
 
     def should_trade(self) -> bool:
@@ -136,12 +140,21 @@ class RandomAllocator:
         if deployable <= 0:
             return intent
 
+        # Per-position dollar cap, derived from the account's total value (equity =
+        # cash + current holdings) so it scales with the account. e.g. 0.2 -> no
+        # single buy targets more than 20% of equity.
+        holdings_value = sum(
+            shares * prices.get(symbol, 0.0) for symbol, shares in current_positions.items()
+        )
+        account_value = max(0.0, cash) + holdings_value
+        cap = self._max_position_fraction * account_value
+
         # Pick a random number of names, but ensure there are enough to actually
         # absorb `deployable` within the per-position cap -- otherwise the cap
         # would strand cash. This keeps the portfolio close to fully invested.
         k = int(self._rng.integers(self._min_buys, self._max_buys + 1))
-        if self._max_position_value > 0:
-            k = max(k, int(np.ceil(deployable / self._max_position_value)))
+        if cap > 0:
+            k = max(k, int(np.ceil(deployable / cap)))
         k = min(k, len(candidates))
         if k <= 0:
             return intent
@@ -153,23 +166,22 @@ class RandomAllocator:
         # Distribute `deployable` across the chosen names by their Dirichlet
         # weights, water-filling overflow from capped names onto the others so
         # the full amount lands (up to total capacity = k * cap).
-        for symbol, target_value in self._water_fill(chosen, weights, deployable).items():
+        for symbol, target_value in self._water_fill(chosen, weights, deployable, cap).items():
             if target_value > 0:
                 intent.buys[symbol] = target_value
 
         return intent
 
     def _water_fill(
-        self, names: list[Symbol], weights: "np.ndarray", deployable: float
+        self, names: list[Symbol], weights: "np.ndarray", deployable: float, cap: float
     ) -> dict[Symbol, float]:
-        """Allocate ``deployable`` across ``names`` by weight, respecting the cap.
+        """Allocate ``deployable`` across ``names`` by weight, respecting ``cap``.
 
-        Overflow from names that hit ``max_position_value`` is redistributed by
-        weight onto the remaining uncapped names, repeating until the cash is
-        placed or every name is capped. Any leftover (when total capacity is
-        below ``deployable``) is simply not allocated.
+        Overflow from names that hit ``cap`` is redistributed by weight onto the
+        remaining uncapped names, repeating until the cash is placed or every name
+        is capped. Any leftover (when total capacity is below ``deployable``) is
+        simply not allocated.
         """
-        cap = self._max_position_value
         weight_map = {s: float(w) for s, w in zip(names, weights)}
         targets: dict[Symbol, float] = {s: 0.0 for s in names}
         active = set(names)

@@ -149,6 +149,15 @@ python scripts/random_portfolio.py --execute
 
 Trades are **simulated unless you pass `--execute`**, and paper mode defaults on.
 
+**Fractional shares** are on by default (`--fractional`; use `--no-fractional` for whole shares).
+This matters a lot for small accounts: with whole shares only, any name priced above a slice of
+your cash is skipped, so a ~$1,000 account can't buy pricier stocks and strands most of its cash.
+
+**Position cap** is a fraction of account value: `--max-position-pct` (default `0.2` = no single
+position targets more than 20% of equity). Because it's relative, it auto-scales — 20% is ~$200 on
+a $1,000 account and ~$20k on a $100k account — and it forces the pool to spread across at least
+`1 / max-position-pct` names (≈5 at the default), so you don't need to retune it per account size.
+
 **Public dashboard:** add `--record-db ./data/dashboard.db` to log equity/positions/trades,
 then serve a read-only web page (current positions, trade history, and a portfolio-value-vs-SPY
 chart):

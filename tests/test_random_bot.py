@@ -11,7 +11,7 @@ PRICES = {s: 100.0 for s in UNIVERSE}
 
 
 def make_allocator(**kwargs) -> RandomAllocator:
-    defaults = dict(seed=42, min_buys=2, max_buys=4, max_position_value=20_000.0)
+    defaults = dict(seed=42, min_buys=2, max_buys=4, max_position_fraction=0.2)
     defaults.update(kwargs)
     return RandomAllocator(**defaults)
 
@@ -28,6 +28,12 @@ class TestConstruction:
     def test_rejects_bad_deploy_range(self):
         with pytest.raises(ValueError):
             RandomAllocator(deploy_fraction_range=(0.8, 0.2))
+
+    def test_rejects_bad_position_fraction(self):
+        with pytest.raises(ValueError):
+            RandomAllocator(max_position_fraction=0.0)
+        with pytest.raises(ValueError):
+            RandomAllocator(max_position_fraction=1.5)
 
 
 class TestShouldTrade:
@@ -48,38 +54,57 @@ class TestShouldTrade:
 
 class TestPlanTrade:
     def test_buys_respect_cash_and_position_cap(self):
-        alloc = make_allocator(max_position_value=5_000.0, deploy_fraction_range=(1.0, 1.0))
+        # 5% of $100k account = $5k per-position cap.
+        alloc = make_allocator(max_position_fraction=0.05, deploy_fraction_range=(1.0, 1.0))
         intent = alloc.plan_trade({}, PRICES, cash=100_000.0, universe=UNIVERSE)
         assert intent.buys
         assert sum(intent.buys.values()) <= 100_000.0 + 1e-6
         assert all(v <= 5_000.0 + 1e-6 for v in intent.buys.values())
 
     def test_buy_count_within_range_when_cap_not_binding(self):
-        # Small cash relative to the per-position cap -> count stays in [min, max].
-        alloc = make_allocator(min_buys=2, max_buys=4, max_position_value=20_000.0)
+        # Cap = 100% of account -> never binds, so count stays in [min, max].
+        alloc = make_allocator(min_buys=2, max_buys=4, max_position_fraction=1.0)
         for _ in range(50):
             intent = alloc.plan_trade({}, PRICES, cash=15_000.0, universe=UNIVERSE)
             assert 2 <= len(intent.buys) <= 4
 
     def test_deploys_nearly_all_cash(self):
         # With a non-binding cap and full deploy, Dirichlet targets sum to ~cash.
-        alloc = make_allocator(deploy_fraction_range=(1.0, 1.0), max_position_value=1e12)
+        alloc = make_allocator(deploy_fraction_range=(1.0, 1.0), max_position_fraction=1.0)
         for _ in range(20):
             intent = alloc.plan_trade({}, PRICES, cash=100_000.0, universe=UNIVERSE)
             assert abs(sum(intent.buys.values()) - 100_000.0) < 1.0  # essentially fully deployed
 
     def test_auto_picks_enough_names_to_absorb_cash(self):
-        # cash/cap = 100k/20k = 5 -> at least 5 names even if min/max_buys are smaller.
-        alloc = make_allocator(min_buys=1, max_buys=2, max_position_value=20_000.0,
+        # cap = 20% of $100k = $20k -> at least 5 names even if min/max_buys are smaller.
+        alloc = make_allocator(min_buys=1, max_buys=2, max_position_fraction=0.2,
                                deploy_fraction_range=(1.0, 1.0))
         intent = alloc.plan_trade({}, PRICES, cash=100_000.0, universe=UNIVERSE)
         assert len(intent.buys) >= 5
         assert abs(sum(intent.buys.values()) - 100_000.0) < 1.0
 
+    def test_cap_scales_with_account_value(self):
+        # The dollar cap is derived from account value, so it scales automatically.
+        alloc = make_allocator(max_position_fraction=0.2, deploy_fraction_range=(1.0, 1.0))
+        small = alloc.plan_trade({}, PRICES, cash=1_000.0, universe=UNIVERSE)
+        assert all(v <= 0.2 * 1_000.0 + 1e-6 for v in small.buys.values())   # <= $200
+        big = alloc.plan_trade({}, PRICES, cash=100_000.0, universe=UNIVERSE)
+        assert all(v <= 0.2 * 100_000.0 + 1e-6 for v in big.buys.values())   # <= $20k
+
+    def test_cap_uses_equity_including_holdings(self):
+        # Account value = cash + holdings; cap reflects total equity, not just cash.
+        alloc = make_allocator(max_position_fraction=0.5, deploy_fraction_range=(1.0, 1.0),
+                               churn_sell_prob=0.0)
+        holdings = {Symbol("AAPL"): 900}  # $90k held + $10k cash = $100k equity
+        intent = alloc.plan_trade(holdings, PRICES, cash=10_000.0, universe=UNIVERSE)
+        # cap = 50% of $100k = $50k (not 50% of $10k cash).
+        assert all(v <= 50_000.0 + 1e-6 for v in intent.buys.values())
+        assert any(v > 5_000.0 for v in intent.buys.values())  # would be impossible if cap used cash only
+
     def test_water_fill_redistributes_capped_overflow(self):
-        # Cash far exceeds total capacity (8 names * 20k = 160k): all names cap out,
-        # overflow is redistributed rather than dropped early.
-        alloc = make_allocator(max_position_value=20_000.0, deploy_fraction_range=(1.0, 1.0))
+        # Cash far exceeds total capacity (8 names * 2% * $1M = 160k): all names cap
+        # out at $20k, overflow is redistributed rather than dropped early.
+        alloc = make_allocator(max_position_fraction=0.02, deploy_fraction_range=(1.0, 1.0))
         intent = alloc.plan_trade({}, PRICES, cash=1_000_000.0, universe=UNIVERSE)
         assert len(intent.buys) == len(UNIVERSE)
         assert all(abs(v - 20_000.0) < 1e-6 for v in intent.buys.values())

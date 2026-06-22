@@ -46,6 +46,11 @@ from stockbot.web.recorder import SnapshotRecorder
 logger = get_logger("random_portfolio")
 
 
+def _fmt_qty(qty: float) -> str:
+    """Format a share quantity: whole numbers plainly, fractions to 4 dp."""
+    return str(int(qty)) if float(qty).is_integer() else f"{qty:.4f}"
+
+
 def load_random_alpaca_config() -> AlpacaConfig:
     """Build an AlpacaConfig for the random bot's own (separate) account.
 
@@ -87,20 +92,23 @@ class RandomPortfolioTrader:
         execute_trades: bool = False,
         feed: str = "iex",
         recorder: Optional[SnapshotRecorder] = None,
+        fractional: bool = True,
     ) -> None:
         self._symbols = symbols
         self._allocator = allocator
         self._execute = execute_trades
         self._feed = feed
         self._recorder = recorder
+        self._fractional = fractional
 
         self._config = load_random_alpaca_config()
         self._data_provider = AlpacaDataProvider(self._config, feed=feed)
         self._broker = AlpacaBroker(self._config) if execute_trades else None
 
-        # Simulated portfolio state (used only in dry-run mode).
+        # Simulated portfolio state (used only in dry-run mode). Float so it can
+        # hold fractional shares.
         self._sim_cash = capital
-        self._sim_positions: dict[str, int] = {s: 0 for s in symbols}
+        self._sim_positions: dict[str, float] = {s: 0.0 for s in symbols}
 
         self._running = False
         self._tick = 0
@@ -121,17 +129,17 @@ class RandomPortfolioTrader:
 
     # -- account / positions -------------------------------------------------
 
-    def _get_positions(self) -> dict[str, int]:
-        """Current long share count per symbol."""
+    def _get_positions(self) -> dict[str, float]:
+        """Current long share quantity per symbol (may be fractional)."""
         if not self._broker:
             return {s: q for s, q in self._sim_positions.items() if q > 0}
         try:
             positions = self._broker.get_positions()
-            result: dict[str, int] = {}
+            result: dict[str, float] = {}
             for symbol in self._symbols:
                 pos = positions.get(Symbol(symbol))
-                if pos and int(pos.quantity) > 0:
-                    result[symbol] = int(pos.quantity)
+                if pos and float(pos.quantity) > 0:
+                    result[symbol] = float(pos.quantity)
             return result
         except Exception as e:
             logger.warning(f"Failed to get positions: {e}")
@@ -166,11 +174,12 @@ class RandomPortfolioTrader:
             price = prices.get(symbol, 0.0)
             if shares <= 0:
                 continue
+            qty_str = _fmt_qty(shares)
             if not self._execute or not self._broker:
                 proceeds = shares * price
                 self._sim_cash += proceeds
-                self._sim_positions[symbol] = max(0, self._sim_positions.get(symbol, 0) - shares)
-                print(f"    [SIM] SELL {shares:5} {symbol:6} @ ${price:.2f}  (+${proceeds:,.0f})")
+                self._sim_positions[symbol] = max(0.0, self._sim_positions.get(symbol, 0.0) - shares)
+                print(f"    [SIM] SELL {qty_str:>9} {symbol:6} @ ${price:.2f}  (+${proceeds:,.0f})")
                 self._record_trade(symbol, "SELL", shares, price)
                 continue
             try:
@@ -178,12 +187,12 @@ class RandomPortfolioTrader:
                     Order(
                         symbol=Symbol(symbol),
                         side=OrderSide.SELL,
-                        quantity=Quantity(Decimal(shares)),
+                        quantity=Quantity(Decimal(str(shares))),
                         order_type=OrderType.MARKET,
                         created_at=Timestamp(int(time.time() * 1_000_000_000)),
                     )
                 )
-                print(f"    SOLD {shares:5} {symbol:6} @ ${price:.2f}")
+                print(f"    SOLD {qty_str:>9} {symbol:6} @ ${price:.2f}")
                 self._record_trade(symbol, "SELL", shares, price, order_id)
             except Exception as e:
                 logger.error(f"Failed to sell {symbol}: {e}")
@@ -198,27 +207,36 @@ class RandomPortfolioTrader:
         else:
             buying_power = self._sim_cash
 
-        if intent.buys and buying_power < 100:
+        if intent.buys and buying_power < 1:
             print("  WARNING: insufficient cash/buying power - skipping buys")
             return
 
-        # ----- BUYS (Dirichlet-sized dollar targets -> whole shares) -----
+        # ----- BUYS (Dirichlet-sized dollar targets -> shares) -----
         spent = 0.0
         for symbol, target_value in sorted(intent.buys.items(), key=lambda kv: kv[1], reverse=True):
             price = prices.get(symbol, 0.0)
             if price <= 0:
                 continue
             budget = min(target_value, buying_power * 0.95 - spent)
-            shares = int(budget / price)
-            if shares < 1:
-                print(f"    SKIP {symbol:6} - insufficient cash for 1 share")
+            if self._fractional:
+                if budget < 1.0:  # Alpaca's fractional minimum is ~$1 notional
+                    print(f"    SKIP {symbol:6} - under $1 fractional minimum")
+                    continue
+                shares = round(budget / price, 6)
+            else:
+                shares = float(int(budget / price))
+                if shares < 1:
+                    print(f"    SKIP {symbol:6} - insufficient cash for 1 whole share (try --fractional)")
+                    continue
+            if shares <= 0:
                 continue
             cost = shares * price
+            qty_str = _fmt_qty(shares)
             if not self._execute or not self._broker:
                 self._sim_cash -= cost
-                self._sim_positions[symbol] = self._sim_positions.get(symbol, 0) + shares
+                self._sim_positions[symbol] = self._sim_positions.get(symbol, 0.0) + shares
                 spent += cost
-                print(f"    [SIM] BUY  {shares:5} {symbol:6} @ ${price:.2f}  (-${cost:,.0f})")
+                print(f"    [SIM] BUY  {qty_str:>9} {symbol:6} @ ${price:.2f}  (-${cost:,.0f})")
                 self._record_trade(symbol, "BUY", shares, price)
                 continue
             try:
@@ -226,13 +244,13 @@ class RandomPortfolioTrader:
                     Order(
                         symbol=Symbol(symbol),
                         side=OrderSide.BUY,
-                        quantity=Quantity(Decimal(shares)),
+                        quantity=Quantity(Decimal(str(shares))),
                         order_type=OrderType.MARKET,
                         created_at=Timestamp(int(time.time() * 1_000_000_000)),
                     )
                 )
                 spent += cost
-                print(f"    BOUGHT {shares:5} {symbol:6} @ ${price:.2f} (${cost:,.0f})")
+                print(f"    BOUGHT {qty_str:>9} {symbol:6} @ ${price:.2f} (${cost:,.0f})")
                 self._record_trade(symbol, "BUY", shares, price, order_id)
             except Exception as e:
                 logger.error(f"Failed to buy {symbol}: {e}")
@@ -243,7 +261,7 @@ class RandomPortfolioTrader:
     # -- dashboard recording -------------------------------------------------
 
     def _record_trade(
-        self, symbol: str, side: str, qty: int, price: float, order_id: Optional[str] = None
+        self, symbol: str, side: str, qty: float, price: float, order_id: Optional[str] = None
     ) -> None:
         if self._recorder:
             self._recorder.record_trade(symbol, side, float(qty), price, order_id)
@@ -407,10 +425,22 @@ def main() -> int:
     parser.add_argument("--max-buys", type=int, default=5)
     parser.add_argument("--deploy-min", type=float, default=0.9, help="Min fraction of cash deployed per event")
     parser.add_argument("--deploy-max", type=float, default=1.0, help="Max fraction of cash deployed per event")
-    parser.add_argument("--max-position-value", type=float, default=20_000.0)
+    parser.add_argument(
+        "--max-position-pct",
+        type=float,
+        default=0.2,
+        help="Cap each position at this fraction (0-1) of account value (default 0.2 = 20%%)",
+    )
     parser.add_argument("--capital", type=float, default=100_000.0, help="Starting cash for dry-run sim")
     parser.add_argument("--seed", type=int, default=None, help="RNG seed for reproducibility")
     parser.add_argument("--feed", type=str, default="iex", choices=["iex", "sip"])
+    parser.add_argument(
+        "--fractional",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Allow fractional-share orders (recommended, esp. for small accounts). "
+        "Use --no-fractional for whole shares only.",
+    )
     parser.add_argument("--execute", action="store_true", help="Place real (paper/live) orders")
     parser.add_argument(
         "--record-db",
@@ -448,7 +478,7 @@ def main() -> int:
         min_buys=args.min_buys,
         max_buys=args.max_buys,
         deploy_fraction_range=(args.deploy_min, args.deploy_max),
-        max_position_value=args.max_position_value,
+        max_position_fraction=args.max_position_pct,
         seed=args.seed,
     )
 
@@ -469,6 +499,7 @@ def main() -> int:
         execute_trades=args.execute,
         feed=args.feed,
         recorder=recorder,
+        fractional=args.fractional,
     )
     trader.run(poll_interval=args.poll_interval)
     return 0
