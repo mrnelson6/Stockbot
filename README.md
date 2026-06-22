@@ -165,9 +165,11 @@ day, so it never books a day trade and can't get restricted. Above the threshold
 Disable with `--no-pdt-guard`. (Note: same-day buy tracking is in-memory; a mid-session restart
 resets it, very briefly relaxing the guard until the next day.)
 
-**Public dashboard:** add `--record-db ./data/dashboard.db` to log equity/positions/trades,
-then serve a read-only web page (current positions, trade history, and a portfolio-value-vs-SPY
-chart):
+**Public dashboard:** add `--record-db auto` to log equity/positions/trades, then serve a
+read-only web page. It shows portfolio-value-vs-SPY (% and $), current positions with cost
+basis / acquisition dates / unrealized P&L, trade history with realized P&L per sale (FIFO
+cost basis), an all-time best/worst-trades leaderboard, and headline stats (realized &
+unrealized P&L, win rate):
 
 ```bash
 pip install -e ".[web]"

@@ -7,6 +7,7 @@ const fmtMoney = (v) =>
 const fmtPct = (v) => (v == null ? "—" : (v >= 0 ? "+" : "") + (v * 100).toFixed(2) + "%");
 const fmtNum = (v) => (v == null ? "—" : v.toLocaleString("en-US", { maximumFractionDigits: 2 }));
 const fmtTime = (ms) => new Date(ms).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+const fmtDate = (ms) => (ms == null ? "—" : new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "2-digit" }));
 
 const signClass = (v) => (v == null ? "" : v >= 0 ? "pos" : "neg");
 
@@ -96,35 +97,68 @@ function renderPositions(rows) {
   const tb = document.querySelector("#positions tbody");
   tb.innerHTML = rows.length
     ? rows
-        .map(
-          (p) => `<tr>
+        .map((p) => {
+          const acq =
+            p.acquired_last_ts && p.acquired_last_ts !== p.acquired_first_ts
+              ? `${fmtDate(p.acquired_first_ts)} – ${fmtDate(p.acquired_last_ts)}`
+              : fmtDate(p.acquired_first_ts);
+          const lots = p.n_lots > 1 ? ` <span class="muted">(${p.n_lots} lots)</span>` : "";
+          return `<tr>
             <td>${p.symbol}</td>
             <td>${fmtNum(p.qty)}</td>
-            <td>${fmtMoney(p.avg_price)}</td>
+            <td>${fmtMoney(p.cost_basis_per_share)}</td>
+            <td>${acq}${lots}</td>
             <td>${fmtMoney(p.market_value)}</td>
             <td class="${signClass(p.unrealized_pnl)}">${p.unrealized_pnl == null ? "—" : fmtMoney(p.unrealized_pnl)}</td>
-          </tr>`
-        )
+            <td class="${signClass(p.unrealized_pnl_pct)}">${fmtPct(p.unrealized_pnl_pct)}</td>
+          </tr>`;
+        })
         .join("")
-    : `<tr><td colspan="5" class="muted">No open positions</td></tr>`;
+    : `<tr><td colspan="7" class="muted">No open positions</td></tr>`;
 }
 
 function renderTrades(rows) {
   const tb = document.querySelector("#trades tbody");
   tb.innerHTML = rows.length
     ? rows
-        .map(
-          (t) => `<tr>
+        .map((t) => {
+          const isSell = t.side.toLowerCase() === "sell";
+          const pnl =
+            isSell && t.realized_pnl != null
+              ? `<span class="${signClass(t.realized_pnl)}">${fmtMoney(t.realized_pnl)} ${
+                  t.realized_pnl_pct != null ? `(${fmtPct(t.realized_pnl_pct)})` : ""
+                }</span>`
+              : '<span class="muted">—</span>';
+          return `<tr>
             <td>${fmtTime(t.ts)}</td>
-            <td class="${t.side.toLowerCase() === "buy" ? "buy" : "sell"}">${t.side.toUpperCase()}</td>
+            <td class="${isSell ? "sell" : "buy"}">${t.side.toUpperCase()}</td>
             <td>${t.symbol}</td>
             <td>${fmtNum(t.qty)}</td>
             <td>${fmtMoney(t.price)}</td>
             <td>${fmtMoney(t.qty * t.price)}</td>
-          </tr>`
-        )
+            <td>${pnl}</td>
+          </tr>`;
+        })
         .join("")
-    : `<tr><td colspan="6" class="muted">No trades yet</td></tr>`;
+    : `<tr><td colspan="7" class="muted">No trades yet</td></tr>`;
+}
+
+function renderLeaderboard(lb) {
+  const row = (t) => `<tr>
+      <td>${fmtTime(t.ts)}</td>
+      <td>${t.symbol}</td>
+      <td>${fmtNum(t.qty)}</td>
+      <td>${fmtMoney(t.price)}</td>
+      <td class="${signClass(t.realized_pnl)}">${fmtMoney(t.realized_pnl)}</td>
+      <td class="${signClass(t.realized_pnl_pct)}">${fmtPct(t.realized_pnl_pct)}</td>
+    </tr>`;
+  const fill = (id, rows) => {
+    document.querySelector(`#${id} tbody`).innerHTML = rows.length
+      ? rows.map(row).join("")
+      : `<tr><td colspan="6" class="muted">No closed trades yet</td></tr>`;
+  };
+  fill("best", lb.best || []);
+  fill("worst", lb.worst || []);
 }
 
 function renderSummary(s) {
@@ -145,22 +179,78 @@ function renderSummary(s) {
   alphaEl.textContent = fmtPct(alpha);
   alphaEl.className = "value " + signClass(alpha);
 
+  const realizedEl = document.getElementById("realized");
+  realizedEl.textContent = s.realized_pnl == null ? "—" : fmtMoney(s.realized_pnl);
+  realizedEl.className = "value " + signClass(s.realized_pnl);
+
+  const unrealEl = document.getElementById("unrealized");
+  unrealEl.textContent = s.unrealized_pnl == null ? "—" : fmtMoney(s.unrealized_pnl);
+  unrealEl.className = "value " + signClass(s.unrealized_pnl);
+
+  const totalEl = document.getElementById("totalPnl");
+  totalEl.textContent = s.total_pnl == null ? "—" : fmtMoney(s.total_pnl);
+  totalEl.className = "value " + signClass(s.total_pnl);
+
+  const winEl = document.getElementById("winRate");
+  winEl.textContent =
+    s.win_rate == null ? "—" : `${(s.win_rate * 100).toFixed(0)}% (${s.n_wins}/${s.n_wins + s.n_losses})`;
+
+  document.getElementById("fees").textContent = s.fees_total == null ? "—" : fmtMoney(s.fees_total);
+
   document.getElementById("updated").textContent = s.last_ts ? "updated " + fmtTime(s.last_ts) : "no data yet";
+}
+
+const fmtRatio = (v) => (v == null ? "—" : v.toFixed(2));
+const fmtPctPlain = (v) => (v == null ? "—" : (v * 100).toFixed(1) + "%");
+const fmtDays = (ms) => {
+  if (ms == null) return "—";
+  const d = ms / 86400000;
+  if (d >= 1) return d.toFixed(1) + "d";
+  const h = ms / 3600000;
+  if (h >= 1) return h.toFixed(1) + "h";
+  return Math.round(ms / 60000) + "m";
+};
+function setStat(id, text, sign) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = "v" + (sign == null ? "" : " " + signClass(sign));
+}
+
+function renderStats(s) {
+  setStat("sTotalRet", fmtPct(s.total_pnl_pct), s.total_pnl_pct);
+  setStat("sMdd", fmtPct(s.max_drawdown), s.max_drawdown);
+  setStat("sVol", s.volatility == null ? "—" : (s.volatility * 100).toFixed(1) + "%");
+  setStat("sSharpe", fmtRatio(s.sharpe), s.sharpe);
+  setStat("sBest", fmtPct(s.best_day), s.best_day);
+  setStat("sWorst", fmtPct(s.worst_day), s.worst_day);
+  setStat("sPf", fmtRatio(s.profit_factor));
+  setStat("sAvgWin", s.avg_win == null ? "—" : fmtMoney(s.avg_win), s.avg_win);
+  setStat("sAvgLoss", s.avg_loss == null ? "—" : fmtMoney(s.avg_loss), s.avg_loss);
+  setStat("sWinStreak", s.longest_win_streak ?? "—");
+  setStat("sLossStreak", s.longest_loss_streak ?? "—");
+  setStat("sHold", fmtDays(s.avg_hold_ms));
+  setStat("sTpd", s.trades_per_day == null ? "—" : s.trades_per_day.toFixed(1));
+  setStat("sInvested", fmtPctPlain(s.invested_pct));
+  setStat("sCashPct", fmtPctPlain(s.cash_pct));
+  setStat("sLargest", fmtPctPlain(s.largest_position_pct));
 }
 
 async function refresh() {
   try {
-    const [summary, equity, positions, trades] = await Promise.all([
+    const [summary, equity, positions, trades, leaderboard] = await Promise.all([
       getJSON("/api/summary"),
       getJSON("/api/equity"),
       getJSON("/api/positions"),
       getJSON("/api/trades?limit=100"),
+      getJSON("/api/leaderboard?n=5"),
     ]);
     renderSummary(summary);
+    renderStats(summary);
     renderChart(equity);
     renderValueChart(equity);
     renderPositions(positions);
     renderTrades(trades);
+    renderLeaderboard(leaderboard);
   } catch (e) {
     document.getElementById("updated").textContent = "connection error — retrying";
     console.error(e);

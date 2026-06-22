@@ -54,8 +54,14 @@ def positions() -> list[dict]:
 
 @app.get("/api/trades")
 def trades(limit: int = Query(100, ge=1, le=1000)) -> list[dict]:
-    """Recent executed trades, newest first."""
+    """Recent executed trades, newest first (sells include realized P&L)."""
     return db.get_trades(DB_PATH, limit=limit)
+
+
+@app.get("/api/leaderboard")
+def leaderboard(n: int = Query(5, ge=1, le=50)) -> dict:
+    """All-time best and worst closed trades by realized P&L."""
+    return db.get_leaderboard(DB_PATH, n=n)
 
 
 @app.get("/api/equity")

@@ -19,6 +19,37 @@
     <div class="card"><div class="label">Bot return</div><div class="value" id="botReturn">—</div></div>
     <div class="card"><div class="label">SPY return</div><div class="value" id="spyReturn">—</div></div>
     <div class="card"><div class="label">vs SPY</div><div class="value" id="alpha">—</div></div>
+    <div class="card"><div class="label">Realized P&amp;L</div><div class="value" id="realized">—</div></div>
+    <div class="card"><div class="label">Unrealized P&amp;L</div><div class="value" id="unrealized">—</div></div>
+    <div class="card"><div class="label">Total P&amp;L</div><div class="value" id="totalPnl">—</div></div>
+    <div class="card"><div class="label">Win rate</div><div class="value" id="winRate">—</div></div>
+    <div class="card"><div class="label">Est. fees</div><div class="value" id="fees">—</div></div>
+  </section>
+
+  <section class="panel">
+    <h2>Performance <span class="muted">(all-time)</span></h2>
+    <div class="stats">
+      <div class="stat"><span class="k">Total return</span><span class="v" id="sTotalRet">—</span></div>
+      <div class="stat"><span class="k">Max drawdown</span><span class="v" id="sMdd">—</span></div>
+      <div class="stat"><span class="k">Volatility (ann.)</span><span class="v" id="sVol">—</span></div>
+      <div class="stat"><span class="k">Sharpe (ann.)</span><span class="v" id="sSharpe">—</span></div>
+      <div class="stat"><span class="k">Best day</span><span class="v" id="sBest">—</span></div>
+      <div class="stat"><span class="k">Worst day</span><span class="v" id="sWorst">—</span></div>
+      <div class="stat"><span class="k">Profit factor</span><span class="v" id="sPf">—</span></div>
+      <div class="stat"><span class="k">Avg win</span><span class="v" id="sAvgWin">—</span></div>
+      <div class="stat"><span class="k">Avg loss</span><span class="v" id="sAvgLoss">—</span></div>
+      <div class="stat"><span class="k">Longest win streak</span><span class="v" id="sWinStreak">—</span></div>
+      <div class="stat"><span class="k">Longest loss streak</span><span class="v" id="sLossStreak">—</span></div>
+      <div class="stat"><span class="k">Avg hold</span><span class="v" id="sHold">—</span></div>
+      <div class="stat"><span class="k">Trades / day</span><span class="v" id="sTpd">—</span></div>
+      <div class="stat"><span class="k">Invested</span><span class="v" id="sInvested">—</span></div>
+      <div class="stat"><span class="k">Cash</span><span class="v" id="sCashPct">—</span></div>
+      <div class="stat"><span class="k">Largest position</span><span class="v" id="sLargest">—</span></div>
+    </div>
+    <p class="muted" style="margin:10px 0 0">
+      Fees are estimated SEC + FINRA regulatory charges on sells (Alpaca is commission-free);
+      rates change periodically, so treat the figure as approximate.
+    </p>
   </section>
 
   <section class="panel">
@@ -31,19 +62,39 @@
     <canvas id="chartValue" height="110"></canvas>
   </section>
 
+  <section class="panel">
+    <h2>Current positions (<span id="posCount">0</span>)</h2>
+    <table id="positions">
+      <thead><tr>
+        <th>Symbol</th><th>Qty</th><th>Cost/sh</th><th>Acquired</th>
+        <th>Value</th><th>Unrealized $</th><th>Unrealized %</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <h2>Recent trades <span class="muted">(P&amp;L shown when a position is sold)</span></h2>
+    <table id="trades">
+      <thead><tr>
+        <th>Time</th><th>Side</th><th>Symbol</th><th>Qty</th><th>Price</th><th>Total</th><th>Realized P&amp;L</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
   <div class="two-col">
     <section class="panel">
-      <h2>Current positions (<span id="posCount">0</span>)</h2>
-      <table id="positions">
-        <thead><tr><th>Symbol</th><th>Qty</th><th>Avg</th><th>Value</th><th>Unrealized</th></tr></thead>
+      <h2>🏆 Best trades <span class="muted">(all time)</span></h2>
+      <table id="best">
+        <thead><tr><th>Time</th><th>Symbol</th><th>Qty</th><th>Sold @</th><th>P&amp;L</th><th>%</th></tr></thead>
         <tbody></tbody>
       </table>
     </section>
-
     <section class="panel">
-      <h2>Recent trades</h2>
-      <table id="trades">
-        <thead><tr><th>Time</th><th>Side</th><th>Symbol</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
+      <h2>💀 Worst trades <span class="muted">(all time)</span></h2>
+      <table id="worst">
+        <thead><tr><th>Time</th><th>Symbol</th><th>Qty</th><th>Sold @</th><th>P&amp;L</th><th>%</th></tr></thead>
         <tbody></tbody>
       </table>
     </section>
