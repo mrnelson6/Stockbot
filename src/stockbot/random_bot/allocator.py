@@ -50,7 +50,7 @@ class RandomAllocator:
         churn_sell_prob: float = 0.3,
         min_buys: int = 1,
         max_buys: int = 5,
-        deploy_fraction_range: tuple[float, float] = (0.2, 0.8),
+        deploy_fraction_range: tuple[float, float] = (0.9, 1.0),
         max_position_value: float = 20_000.0,
         seed: int | None = None,
     ) -> None:
@@ -131,21 +131,65 @@ class RandomAllocator:
         if not candidates:
             return intent
 
+        deploy_fraction = float(self._rng.uniform(self._deploy_low, self._deploy_high))
+        deployable = available_cash * deploy_fraction
+        if deployable <= 0:
+            return intent
+
+        # Pick a random number of names, but ensure there are enough to actually
+        # absorb `deployable` within the per-position cap -- otherwise the cap
+        # would strand cash. This keeps the portfolio close to fully invested.
         k = int(self._rng.integers(self._min_buys, self._max_buys + 1))
+        if self._max_position_value > 0:
+            k = max(k, int(np.ceil(deployable / self._max_position_value)))
         k = min(k, len(candidates))
         if k <= 0:
             return intent
 
         chosen_idx = self._rng.choice(len(candidates), size=k, replace=False)
         chosen = [candidates[i] for i in np.atleast_1d(chosen_idx)]
-
-        deploy_fraction = float(self._rng.uniform(self._deploy_low, self._deploy_high))
-        deployable = available_cash * deploy_fraction
-
         weights = self._rng.dirichlet(np.ones(k))
-        for symbol, weight in zip(chosen, weights):
-            target_value = min(deployable * float(weight), self._max_position_value)
+
+        # Distribute `deployable` across the chosen names by their Dirichlet
+        # weights, water-filling overflow from capped names onto the others so
+        # the full amount lands (up to total capacity = k * cap).
+        for symbol, target_value in self._water_fill(chosen, weights, deployable).items():
             if target_value > 0:
                 intent.buys[symbol] = target_value
 
         return intent
+
+    def _water_fill(
+        self, names: list[Symbol], weights: "np.ndarray", deployable: float
+    ) -> dict[Symbol, float]:
+        """Allocate ``deployable`` across ``names`` by weight, respecting the cap.
+
+        Overflow from names that hit ``max_position_value`` is redistributed by
+        weight onto the remaining uncapped names, repeating until the cash is
+        placed or every name is capped. Any leftover (when total capacity is
+        below ``deployable``) is simply not allocated.
+        """
+        cap = self._max_position_value
+        weight_map = {s: float(w) for s, w in zip(names, weights)}
+        targets: dict[Symbol, float] = {s: 0.0 for s in names}
+        active = set(names)
+        remaining = deployable
+
+        # At most one pass per name can become newly capped, so this terminates.
+        for _ in range(len(names) + 1):
+            if remaining <= 1e-6 or not active:
+                break
+            weight_sum = sum(weight_map[s] for s in active)
+            newly_capped: list[Symbol] = []
+            overflow = 0.0
+            for s in active:
+                share = remaining * weight_map[s] / weight_sum if weight_sum > 0 else remaining / len(active)
+                targets[s] += share
+                if cap > 0 and targets[s] >= cap:
+                    overflow += targets[s] - cap
+                    targets[s] = cap
+                    newly_capped.append(s)
+            remaining = overflow
+            active.difference_update(newly_capped)
+
+        return targets

@@ -54,11 +54,36 @@ class TestPlanTrade:
         assert sum(intent.buys.values()) <= 100_000.0 + 1e-6
         assert all(v <= 5_000.0 + 1e-6 for v in intent.buys.values())
 
-    def test_buy_count_within_range(self):
-        alloc = make_allocator(min_buys=2, max_buys=4)
+    def test_buy_count_within_range_when_cap_not_binding(self):
+        # Small cash relative to the per-position cap -> count stays in [min, max].
+        alloc = make_allocator(min_buys=2, max_buys=4, max_position_value=20_000.0)
         for _ in range(50):
-            intent = alloc.plan_trade({}, PRICES, cash=100_000.0, universe=UNIVERSE)
+            intent = alloc.plan_trade({}, PRICES, cash=15_000.0, universe=UNIVERSE)
             assert 2 <= len(intent.buys) <= 4
+
+    def test_deploys_nearly_all_cash(self):
+        # With a non-binding cap and full deploy, Dirichlet targets sum to ~cash.
+        alloc = make_allocator(deploy_fraction_range=(1.0, 1.0), max_position_value=1e12)
+        for _ in range(20):
+            intent = alloc.plan_trade({}, PRICES, cash=100_000.0, universe=UNIVERSE)
+            assert abs(sum(intent.buys.values()) - 100_000.0) < 1.0  # essentially fully deployed
+
+    def test_auto_picks_enough_names_to_absorb_cash(self):
+        # cash/cap = 100k/20k = 5 -> at least 5 names even if min/max_buys are smaller.
+        alloc = make_allocator(min_buys=1, max_buys=2, max_position_value=20_000.0,
+                               deploy_fraction_range=(1.0, 1.0))
+        intent = alloc.plan_trade({}, PRICES, cash=100_000.0, universe=UNIVERSE)
+        assert len(intent.buys) >= 5
+        assert abs(sum(intent.buys.values()) - 100_000.0) < 1.0
+
+    def test_water_fill_redistributes_capped_overflow(self):
+        # Cash far exceeds total capacity (8 names * 20k = 160k): all names cap out,
+        # overflow is redistributed rather than dropped early.
+        alloc = make_allocator(max_position_value=20_000.0, deploy_fraction_range=(1.0, 1.0))
+        intent = alloc.plan_trade({}, PRICES, cash=1_000_000.0, universe=UNIVERSE)
+        assert len(intent.buys) == len(UNIVERSE)
+        assert all(abs(v - 20_000.0) < 1e-6 for v in intent.buys.values())
+        assert abs(sum(intent.buys.values()) - 160_000.0) < 1e-6
 
     def test_churn_sells_are_subset_of_holdings(self):
         alloc = make_allocator(churn_sell_prob=0.5)

@@ -51,6 +51,46 @@ function renderChart(series) {
   }
 }
 
+let valueChart;
+function renderValueChart(series) {
+  // Raw dollars: actual portfolio value vs investing the same starting capital
+  // in SPY at inception (start_equity * spy_t / spy_0).
+  const withSpy = series.filter((p) => p.spy_price != null);
+  const eq0 = series.length ? series[0].equity : null;
+  const spy0 = withSpy.length ? withSpy[0].spy_price : null;
+
+  const labels = series.map((p) => fmtTime(p.ts));
+  const botVal = series.map((p) => p.equity);
+  const spyVal = series.map((p) => (eq0 && spy0 && p.spy_price != null ? eq0 * (p.spy_price / spy0) : null));
+
+  const data = {
+    labels,
+    datasets: [
+      { label: "Portfolio", data: botVal, borderColor: "#58a6ff", backgroundColor: "rgba(88,166,255,.1)", fill: true, tension: 0.15, pointRadius: 0, borderWidth: 2 },
+      { label: "SPY equivalent", data: spyVal, borderColor: "#8b949e", borderDash: [5, 4], fill: false, tension: 0.15, pointRadius: 0, borderWidth: 1.5 },
+    ],
+  };
+  const opts = {
+    responsive: true,
+    interaction: { mode: "index", intersect: false },
+    scales: {
+      x: { ticks: { color: "#8b949e", maxTicksLimit: 8 }, grid: { color: "#2a323c" } },
+      y: { ticks: { color: "#8b949e", callback: (v) => fmtMoney(v) }, grid: { color: "#2a323c" } },
+    },
+    plugins: {
+      legend: { labels: { color: "#e6edf3" } },
+      tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${c.parsed.y == null ? "—" : fmtMoney(c.parsed.y)}` } },
+    },
+  };
+  if (valueChart) {
+    valueChart.data = data;
+    valueChart.options = opts;
+    valueChart.update("none");
+  } else {
+    valueChart = new Chart(document.getElementById("chartValue"), { type: "line", data, options: opts });
+  }
+}
+
 function renderPositions(rows) {
   document.getElementById("posCount").textContent = rows.length;
   const tb = document.querySelector("#positions tbody");
@@ -80,10 +120,11 @@ function renderTrades(rows) {
             <td>${t.symbol}</td>
             <td>${fmtNum(t.qty)}</td>
             <td>${fmtMoney(t.price)}</td>
+            <td>${fmtMoney(t.qty * t.price)}</td>
           </tr>`
         )
         .join("")
-    : `<tr><td colspan="5" class="muted">No trades yet</td></tr>`;
+    : `<tr><td colspan="6" class="muted">No trades yet</td></tr>`;
 }
 
 function renderSummary(s) {
@@ -117,6 +158,7 @@ async function refresh() {
     ]);
     renderSummary(summary);
     renderChart(equity);
+    renderValueChart(equity);
     renderPositions(positions);
     renderTrades(trades);
   } catch (e) {
