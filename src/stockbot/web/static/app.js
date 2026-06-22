@@ -100,13 +100,15 @@ function renderPositions(rows) {
         .map((p) => {
           const acq =
             p.acquired_last_ts && p.acquired_last_ts !== p.acquired_first_ts
-              ? `${fmtDate(p.acquired_first_ts)} – ${fmtDate(p.acquired_last_ts)}`
-              : fmtDate(p.acquired_first_ts);
+              ? `${fmtTime(p.acquired_first_ts)} – ${fmtTime(p.acquired_last_ts)}`
+              : fmtTime(p.acquired_first_ts);
           const lots = p.n_lots > 1 ? ` <span class="muted">(${p.n_lots} lots)</span>` : "";
+          const pricePerShare = p.qty ? p.market_value / p.qty : null;
           return `<tr>
             <td>${p.symbol}</td>
             <td>${fmtNum(p.qty)}</td>
             <td>${fmtMoney(p.cost_basis_per_share)}</td>
+            <td>${fmtMoney(pricePerShare)}</td>
             <td>${acq}${lots}</td>
             <td>${fmtMoney(p.market_value)}</td>
             <td class="${signClass(p.unrealized_pnl)}">${p.unrealized_pnl == null ? "—" : fmtMoney(p.unrealized_pnl)}</td>
@@ -114,7 +116,7 @@ function renderPositions(rows) {
           </tr>`;
         })
         .join("")
-    : `<tr><td colspan="7" class="muted">No open positions</td></tr>`;
+    : `<tr><td colspan="8" class="muted">No open positions</td></tr>`;
 }
 
 function renderTrades(rows) {
