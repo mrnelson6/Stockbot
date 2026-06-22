@@ -1,6 +1,40 @@
 """Tests for the dashboard SQLite persistence layer."""
 
+import pytest
+
 from stockbot.web import db
+
+
+class TestResolveDashboardDb:
+    def _clear(self, mp):
+        for var in ("STOCKBOT_WEB_DB", "STOCKBOT_DATA_DIR", "RANDOM_ALPACA_PAPER", "ALPACA_PAPER"):
+            mp.delenv(var, raising=False)
+
+    def test_explicit_override_wins(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("STOCKBOT_WEB_DB", "/tmp/custom.db")
+        assert db.resolve_dashboard_db() == "/tmp/custom.db"
+        # even when a mode is passed
+        assert db.resolve_dashboard_db(paper=False) == "/tmp/custom.db"
+
+    def test_paper_and_live_paths(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("STOCKBOT_DATA_DIR", "/data")
+        assert db.resolve_dashboard_db(paper=True).replace("\\", "/") == "/data/dashboard-paper.db"
+        assert db.resolve_dashboard_db(paper=False).replace("\\", "/") == "/data/dashboard-live.db"
+
+    def test_reads_paper_flag_from_env(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("STOCKBOT_DATA_DIR", "/data")
+        monkeypatch.setenv("RANDOM_ALPACA_PAPER", "false")
+        assert db.resolve_dashboard_db().replace("\\", "/") == "/data/dashboard-live.db"
+        monkeypatch.setenv("RANDOM_ALPACA_PAPER", "true")
+        assert db.resolve_dashboard_db().replace("\\", "/") == "/data/dashboard-paper.db"
+
+    def test_defaults_to_paper(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("STOCKBOT_DATA_DIR", "/data")
+        assert db.resolve_dashboard_db().replace("\\", "/") == "/data/dashboard-paper.db"
 
 
 def test_init_and_empty_summary(tmp_path):

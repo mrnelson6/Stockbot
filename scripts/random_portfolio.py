@@ -40,7 +40,14 @@ from stockbot.data.providers.alpaca import AlpacaDataProvider
 from stockbot.execution.broker_alpaca import AlpacaBroker
 from stockbot.monitoring import setup_logging
 from stockbot.monitoring.logger import get_logger
-from stockbot.random_bot import RandomAllocator, fetch_dynamic_universe
+from stockbot.random_bot import (
+    PDT_EQUITY_THRESHOLD,
+    RandomAllocator,
+    fetch_dynamic_universe,
+    market_date,
+    pdt_guarded_sells,
+)
+from stockbot.web.db import resolve_dashboard_db
 from stockbot.web.recorder import SnapshotRecorder
 
 logger = get_logger("random_portfolio")
@@ -93,6 +100,8 @@ class RandomPortfolioTrader:
         feed: str = "iex",
         recorder: Optional[SnapshotRecorder] = None,
         fractional: bool = True,
+        pdt_guard: bool = True,
+        pdt_threshold: float = PDT_EQUITY_THRESHOLD,
     ) -> None:
         self._symbols = symbols
         self._allocator = allocator
@@ -100,6 +109,8 @@ class RandomPortfolioTrader:
         self._feed = feed
         self._recorder = recorder
         self._fractional = fractional
+        self._pdt_guard = pdt_guard
+        self._pdt_threshold = pdt_threshold
 
         self._config = load_random_alpaca_config()
         self._data_provider = AlpacaDataProvider(self._config, feed=feed)
@@ -109,6 +120,11 @@ class RandomPortfolioTrader:
         # hold fractional shares.
         self._sim_cash = capital
         self._sim_positions: dict[str, float] = {s: 0.0 for s in symbols}
+
+        # PDT guard state: shares bought during the current market day, so we can
+        # avoid same-day round trips that would count as day trades.
+        self._bought_today: dict[str, float] = {}
+        self._bought_day = market_date()
 
         self._running = False
         self._tick = 0
@@ -152,6 +168,29 @@ class RandomPortfolioTrader:
             return float(self._broker.get_cash())
         except Exception:
             return 0.0
+
+    def _equity(self, prices: dict[str, float]) -> float:
+        """Account total value (cash + holdings), marked to current prices."""
+        if self._broker:
+            try:
+                return float(self._broker.get_equity())
+            except Exception:
+                return self._get_cash()
+        value = self._sim_cash
+        for sym, qty in self._sim_positions.items():
+            if qty > 0:
+                value += qty * prices.get(sym, 0.0)
+        return value
+
+    def _roll_day(self) -> None:
+        """Reset same-day buy tracking when the market date changes."""
+        today = market_date()
+        if today != self._bought_day:
+            self._bought_day = today
+            self._bought_today = {}
+
+    def _track_buy(self, symbol: str, shares: float) -> None:
+        self._bought_today[symbol] = self._bought_today.get(symbol, 0.0) + shares
 
     def _get_account_value(self) -> float:
         if not self._broker:
@@ -238,6 +277,7 @@ class RandomPortfolioTrader:
                 spent += cost
                 print(f"    [SIM] BUY  {qty_str:>9} {symbol:6} @ ${price:.2f}  (-${cost:,.0f})")
                 self._record_trade(symbol, "BUY", shares, price)
+                self._track_buy(symbol, shares)
                 continue
             try:
                 order_id = self._broker.submit_order(
@@ -252,6 +292,7 @@ class RandomPortfolioTrader:
                 spent += cost
                 print(f"    BOUGHT {qty_str:>9} {symbol:6} @ ${price:.2f} (${cost:,.0f})")
                 self._record_trade(symbol, "BUY", shares, price, order_id)
+                self._track_buy(symbol, shares)
             except Exception as e:
                 logger.error(f"Failed to buy {symbol}: {e}")
 
@@ -319,6 +360,7 @@ class RandomPortfolioTrader:
 
     def _process_tick(self) -> None:
         self._tick += 1
+        self._roll_day()
         print(f"\n=== Tick {self._tick} ===", flush=True)
 
         # Fetch prices every tick: needed both for trading and to mark the
@@ -331,7 +373,8 @@ class RandomPortfolioTrader:
         if self._allocator.should_trade():
             positions = self._get_positions()
             cash = self._get_cash()
-            print(f"  Trade event! cash ~${cash:,.0f}, holdings={len(positions)}")
+            equity = self._equity(prices)
+            print(f"  Trade event! cash ~${cash:,.0f}, equity ~${equity:,.0f}, holdings={len(positions)}")
 
             intent = self._allocator.plan_trade(
                 current_positions={Symbol(s): q for s, q in positions.items()},
@@ -342,6 +385,20 @@ class RandomPortfolioTrader:
             # Keys come back as Symbol (str subtype); index dicts with plain str.
             intent.sells = {str(s): q for s, q in intent.sells.items()}
             intent.buys = {str(s): v for s, v in intent.buys.items()}
+
+            # PDT guard: on a sub-$25k account, don't sell shares bought today
+            # (that would be a day trade). Below the threshold this trims/drops
+            # such sells so the day-trade count never rises.
+            guarded = pdt_guarded_sells(
+                intent.sells, self._bought_today, equity,
+                threshold=self._pdt_threshold, enabled=self._pdt_guard,
+            )
+            held_back = [s for s in intent.sells if guarded.get(s, 0.0) < intent.sells[s] - 1e-9]
+            if held_back:
+                print(f"  PDT-guard (equity < ${self._pdt_threshold:,.0f}): holding "
+                      f"{len(held_back)} name(s) bought today to avoid day trades: {', '.join(held_back)}")
+            intent.sells = guarded
+
             self._execute_intent(intent, prices)
         else:
             print("  No trade this tick (random gate).")
@@ -441,12 +498,27 @@ def main() -> int:
         help="Allow fractional-share orders (recommended, esp. for small accounts). "
         "Use --no-fractional for whole shares only.",
     )
+    parser.add_argument(
+        "--pdt-guard",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Avoid same-day round trips when equity is below the PDT threshold "
+        "(default on). Use --no-pdt-guard to disable.",
+    )
+    parser.add_argument(
+        "--pdt-threshold",
+        type=float,
+        default=PDT_EQUITY_THRESHOLD,
+        help="Account equity below which the PDT guard activates (default 25000).",
+    )
     parser.add_argument("--execute", action="store_true", help="Place real (paper/live) orders")
     parser.add_argument(
         "--record-db",
         type=str,
         default=None,
-        help="Path to a SQLite file to record equity/positions/trades for the web dashboard",
+        help="Record equity/positions/trades for the web dashboard. Pass a file path, "
+        "or 'auto' to derive it from the account (data/dashboard-{paper,live}.db) so it "
+        "follows .env. Omit to disable recording.",
     )
     parser.add_argument("--label", type=str, default="Random Bot", help="Display name on the dashboard")
     args = parser.parse_args()
@@ -486,9 +558,15 @@ def main() -> int:
     if args.record_db:
         # The recorder needs a data provider for SPY pricing; build it up front so
         # the trader and recorder share one.
+        cfg = load_random_alpaca_config()
+        db_path = (
+            resolve_dashboard_db(paper=cfg.paper)
+            if args.record_db == "auto"
+            else args.record_db
+        )
         recorder = SnapshotRecorder(
-            args.record_db,
-            AlpacaDataProvider(load_random_alpaca_config(), feed=args.feed),
+            db_path,
+            AlpacaDataProvider(cfg, feed=args.feed),
             label=args.label,
         )
 
@@ -500,6 +578,8 @@ def main() -> int:
         feed=args.feed,
         recorder=recorder,
         fractional=args.fractional,
+        pdt_guard=args.pdt_guard,
+        pdt_threshold=args.pdt_threshold,
     )
     trader.run(poll_interval=args.poll_interval)
     return 0

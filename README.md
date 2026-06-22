@@ -158,6 +158,13 @@ position targets more than 20% of equity). Because it's relative, it auto-scales
 a $1,000 account and ~$20k on a $100k account — and it forces the pool to spread across at least
 `1 / max-position-pct` names (≈5 at the default), so you don't need to retune it per account size.
 
+**PDT guard** (on by default) protects small accounts from the Pattern Day Trader rule. FINRA limits
+accounts under $25k to 3 day trades per 5 business days; a churning bot trips that fast. When account
+equity is below `--pdt-threshold` (default $25,000), the bot will not sell shares it bought the same
+day, so it never books a day trade and can't get restricted. Above the threshold the guard is inert.
+Disable with `--no-pdt-guard`. (Note: same-day buy tracking is in-memory; a mid-session restart
+resets it, very briefly relaxing the guard until the next day.)
+
 **Public dashboard:** add `--record-db ./data/dashboard.db` to log equity/positions/trades,
 then serve a read-only web page (current positions, trade history, and a portfolio-value-vs-SPY
 chart):

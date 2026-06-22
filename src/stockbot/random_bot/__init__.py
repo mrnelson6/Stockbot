@@ -11,6 +11,11 @@ can be unit tested and reproduced. Execution against Alpaca lives in
 """
 
 from stockbot.random_bot.allocator import RandomAllocator, TradeIntent
+from stockbot.random_bot.pdt import (
+    PDT_EQUITY_THRESHOLD,
+    market_date,
+    pdt_guarded_sells,
+)
 from stockbot.random_bot.universe_source import (
     fetch_dynamic_universe,
     rank_by_liquidity,
@@ -21,4 +26,7 @@ __all__ = [
     "TradeIntent",
     "fetch_dynamic_universe",
     "rank_by_liquidity",
+    "PDT_EQUITY_THRESHOLD",
+    "market_date",
+    "pdt_guarded_sells",
 ]

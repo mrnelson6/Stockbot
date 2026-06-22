@@ -64,21 +64,23 @@ python scripts/random_portfolio.py --universe-source static --universe-size 10
 
 ## 2. Run it manually first (verify before daemonizing)
 
-Terminal 1 — the bot (paper trading + recording):
+Terminal 1 — the bot (paper trading + recording). `--record-db auto` derives the DB
+path from the account in `.env`, writing `data/dashboard-paper.db` (or `-live.db`):
 ```bash
 source .venv/bin/activate
 python scripts/random_portfolio.py \
     --execute \
-    --record-db ./data/dashboard.db \
+    --record-db auto \
     --label "Random Bot" \
     --poll-interval 30 \
     --trade-prob 0.2
 ```
 
-Terminal 2 — the web server (bound to localhost; Caddy will expose it):
+Terminal 2 — the web server (bound to localhost; Caddy will expose it). With no `--db`
+it auto-selects the same account-derived file, so it follows `.env` automatically:
 ```bash
 source .venv/bin/activate
-python scripts/serve_web.py --db ./data/dashboard.db --host 127.0.0.1 --port 8000
+python scripts/serve_web.py --host 127.0.0.1 --port 8000
 ```
 
 Visit `http://<box-ip>:8000` (or tunnel) to confirm the dashboard populates. The bot only
@@ -100,7 +102,7 @@ Wants=network-online.target
 User=youruser
 WorkingDirectory=/home/youruser/stockbot
 ExecStart=/home/youruser/stockbot/.venv/bin/python scripts/random_portfolio.py \
-    --execute --record-db /home/youruser/stockbot/data/dashboard.db \
+    --execute --record-db auto \
     --label "Random Bot" --poll-interval 30 --trade-prob 0.2
 Restart=on-failure
 RestartSec=10
@@ -119,7 +121,8 @@ After=network-online.target
 [Service]
 User=youruser
 WorkingDirectory=/home/youruser/stockbot
-Environment=STOCKBOT_WEB_DB=/home/youruser/stockbot/data/dashboard.db
+# No STOCKBOT_WEB_DB: the web app reads .env and auto-selects
+# data/dashboard-{paper,live}.db, matching whichever account the bot uses.
 ExecStart=/home/youruser/stockbot/.venv/bin/python scripts/serve_web.py --host 127.0.0.1 --port 8000
 Restart=on-failure
 RestartSec=10
@@ -170,6 +173,24 @@ source .venv/bin/activate
 pip install -e ".[web]"        # only if deps changed
 sudo systemctl restart stockbot-random stockbot-web
 ```
+
+---
+
+## 6. Switching paper ↔ live (fresh dashboard, no unit edits)
+
+Because both services use the account-derived DB (`--record-db auto` and no
+`STOCKBOT_WEB_DB`), switching accounts is just an `.env` change plus a restart — the
+dashboard starts fresh on a separate file and the old history is preserved:
+
+```bash
+# edit .env: RANDOM_ALPACA_PAPER=false  +  live ALPACA/RANDOM_ALPACA keys
+sudo systemctl restart stockbot-random stockbot-web
+```
+
+The bot now writes `data/dashboard-live.db` and the web reads the same file, so the site
+shows only live history. Your paper run stays in `data/dashboard-paper.db` untouched. (Flip
+back to paper and the old paper history reappears.) Confirm on first start that the bot log
+prints `Account paper=False` and a sane `equity ~$<live balance>`.
 
 ---
 

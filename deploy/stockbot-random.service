@@ -7,7 +7,7 @@ Wants=network-online.target
 User=marvin
 WorkingDirectory=/home/marvin/Documents/Stockbot
 ExecStart=/home/marvin/Documents/Stockbot/.venv/bin/python scripts/random_portfolio.py \
-    --execute --record-db /home/marvin/Documents/Stockbot/data/dashboard.db \
+    --execute --record-db auto \
     --label "Random Bot" --poll-interval 30 --trade-prob 0.2
 Restart=on-failure
 RestartSec=10

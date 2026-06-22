@@ -3,7 +3,13 @@
 import pytest
 
 from stockbot.core.types import Symbol
-from stockbot.random_bot import RandomAllocator, TradeIntent, rank_by_liquidity
+from stockbot.random_bot import (
+    PDT_EQUITY_THRESHOLD,
+    RandomAllocator,
+    TradeIntent,
+    pdt_guarded_sells,
+    rank_by_liquidity,
+)
 
 
 UNIVERSE = [Symbol(s) for s in ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM"]]
@@ -169,6 +175,35 @@ class TestEdgeCases:
         for _ in range(20):
             intent = alloc.plan_trade({}, prices, cash=100_000.0, universe=UNIVERSE)
             assert all(sym == Symbol("AAPL") for sym in intent.buys)
+
+
+class TestPdtGuard:
+    SELLS = {"AAPL": 10.0, "MSFT": 5.0}
+
+    def test_no_guard_above_threshold(self):
+        # Big account -> PDT doesn't apply, sells pass through untouched.
+        out = pdt_guarded_sells(self.SELLS, {"AAPL": 10.0}, account_value=100_000.0)
+        assert out == self.SELLS
+
+    def test_disabled_passes_through(self):
+        out = pdt_guarded_sells(self.SELLS, {"AAPL": 10.0}, account_value=1_000.0, enabled=False)
+        assert out == self.SELLS
+
+    def test_drops_name_fully_bought_today(self):
+        # Small account, all 10 AAPL were bought today -> can't sell any of it.
+        out = pdt_guarded_sells(self.SELLS, {"AAPL": 10.0}, account_value=1_000.0)
+        assert "AAPL" not in out
+        assert out["MSFT"] == 5.0  # MSFT not bought today -> still sellable
+
+    def test_reduces_to_overnight_portion(self):
+        # Held 10 AAPL, 4 bought today -> only the 6 overnight shares are sellable.
+        out = pdt_guarded_sells({"AAPL": 10.0}, {"AAPL": 4.0}, account_value=1_000.0)
+        assert out["AAPL"] == 6.0
+
+    def test_threshold_boundary(self):
+        # Exactly at threshold -> not restricted (rule is "below $25k").
+        out = pdt_guarded_sells(self.SELLS, {"AAPL": 10.0}, account_value=PDT_EQUITY_THRESHOLD)
+        assert out == self.SELLS
 
 
 class TestRankByLiquidity:

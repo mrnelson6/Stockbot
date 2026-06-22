@@ -11,6 +11,7 @@ The DB is opened in WAL mode so the trading process (writer) and the web process
 which keeps things thread-safe under FastAPI without a shared connection/lock.
 """
 
+import os
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -52,6 +53,31 @@ CREATE TABLE IF NOT EXISTS meta (
 def now_ms() -> int:
     """Current unix time in milliseconds."""
     return int(time.time() * 1000)
+
+
+def resolve_dashboard_db(paper: Optional[bool] = None) -> str:
+    """Pick the dashboard DB path so it follows the trading account.
+
+    Both the bot (writer) and the web app (reader) call this, so flipping the
+    account in .env (RANDOM_ALPACA_PAPER) points them at the same file without
+    any other config change: paper -> dashboard-paper.db, live -> dashboard-live.db.
+
+    Precedence:
+    1. STOCKBOT_WEB_DB, if set, is an explicit override (used as-is).
+    2. Otherwise <STOCKBOT_DATA_DIR or ./data>/dashboard-{paper|live}.db, where the
+       mode comes from the ``paper`` arg if given, else RANDOM_ALPACA_PAPER /
+       ALPACA_PAPER (default paper=true).
+    """
+    override = os.getenv("STOCKBOT_WEB_DB")
+    if override:
+        return override
+
+    data_dir = os.getenv("STOCKBOT_DATA_DIR", "./data")
+    if paper is None:
+        flag = os.getenv("RANDOM_ALPACA_PAPER", os.getenv("ALPACA_PAPER", "true"))
+        paper = flag.lower() == "true"
+    suffix = "paper" if paper else "live"
+    return str(Path(data_dir) / f"dashboard-{suffix}.db")
 
 
 @contextmanager

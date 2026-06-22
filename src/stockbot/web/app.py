@@ -8,16 +8,18 @@ The DB path comes from the STOCKBOT_WEB_DB env var (default ./data/dashboard.db)
 and must point at the same file the bot records to (``--record-db``).
 """
 
-import os
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from stockbot.web import db
 
-DB_PATH = os.getenv("STOCKBOT_WEB_DB", "./data/dashboard.db")
+# Load .env so the DB path can follow the trading account (RANDOM_ALPACA_PAPER).
+load_dotenv()
+DB_PATH = db.resolve_dashboard_db()
 STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(title="Random Bot Dashboard", docs_url=None, redoc_url=None)
