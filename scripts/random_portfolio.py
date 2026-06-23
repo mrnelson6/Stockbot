@@ -475,7 +475,7 @@ def main() -> int:
     parser.add_argument(
         "--lookback-days", type=int, default=30, help="[alpaca] Days of daily bars used to gauge liquidity"
     )
-    parser.add_argument("--poll-interval", type=float, default=60.0, help="Seconds between ticks")
+    parser.add_argument("--poll-interval", type=float, default=180.0, help="Seconds between ticks")
     parser.add_argument("--trade-prob", type=float, default=0.1, help="Per-tick probability of trading")
     parser.add_argument("--churn-sell-prob", type=float, default=0.3, help="Per-holding sell probability per event")
     parser.add_argument("--min-buys", type=int, default=1)

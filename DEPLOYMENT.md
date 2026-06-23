@@ -72,8 +72,8 @@ python scripts/random_portfolio.py \
     --execute \
     --record-db auto \
     --label "Random Bot" \
-    --poll-interval 30 \
-    --trade-prob 0.2
+    --poll-interval 180 \
+    --trade-prob 0.1
 ```
 
 Terminal 2 — the web server (bound to localhost; Caddy will expose it). With no `--db`
@@ -103,7 +103,7 @@ User=youruser
 WorkingDirectory=/home/youruser/stockbot
 ExecStart=/home/youruser/stockbot/.venv/bin/python scripts/random_portfolio.py \
     --execute --record-db auto \
-    --label "Random Bot" --poll-interval 30 --trade-prob 0.2
+    --label "Random Bot" --poll-interval 180 --trade-prob 0.1
 Restart=on-failure
 RestartSec=10
 

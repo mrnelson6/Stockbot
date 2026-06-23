@@ -8,7 +8,7 @@ User=marvin
 WorkingDirectory=/home/marvin/Documents/Stockbot
 ExecStart=/home/marvin/Documents/Stockbot/.venv/bin/python scripts/random_portfolio.py \
     --execute --record-db auto \
-    --label "Random Bot" --poll-interval 30 --trade-prob 0.2
+    --label "Random Bot" --poll-interval 180 --trade-prob 0.1
 Restart=on-failure
 RestartSec=10
 
