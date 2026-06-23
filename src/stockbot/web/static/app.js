@@ -17,6 +17,49 @@ async function getJSON(path) {
   return r.json();
 }
 
+// ---- chart theming ----
+const CHART = { accent: "#4f8cff", muted: "#8b97a8", grid: "rgba(255,255,255,0.05)", text: "#cbd5e1" };
+
+function areaFill(alphaTop) {
+  return (c) => {
+    const area = c.chart.chartArea;
+    if (!area) return "rgba(79,140,255,0)";
+    const g = c.chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
+    g.addColorStop(0, `rgba(79,140,255,${alphaTop})`);
+    g.addColorStop(1, "rgba(79,140,255,0)");
+    return g;
+  };
+}
+
+function chartOpts(yTick, tipLabel) {
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: "index", intersect: false },
+    scales: {
+      x: { ticks: { color: CHART.muted, maxTicksLimit: 7, font: { size: 11 } }, grid: { display: false } },
+      y: { ticks: { color: CHART.muted, callback: yTick, font: { size: 11 } }, grid: { color: CHART.grid }, border: { display: false } },
+    },
+    plugins: {
+      legend: { labels: { color: CHART.text, usePointStyle: true, pointStyle: "line", boxWidth: 22 } },
+      tooltip: {
+        backgroundColor: "#0d1320", borderColor: "#283650", borderWidth: 1, padding: 10,
+        titleColor: "#e8eef6", bodyColor: "#cbd5e1", cornerRadius: 8,
+        callbacks: { label: tipLabel },
+      },
+    },
+  };
+}
+
+const lineDataset = (label, data, opts = {}) => ({
+  label, data, borderColor: CHART.accent, backgroundColor: areaFill(0.28),
+  fill: true, tension: 0.25, pointRadius: 0, pointHoverRadius: 4, borderWidth: 2, ...opts,
+});
+const spyDataset = (label, data) => ({
+  label, data, borderColor: CHART.muted, backgroundColor: "transparent",
+  borderDash: [5, 4], fill: false, tension: 0.25, pointRadius: 0, borderWidth: 1.5,
+});
+
 let chart;
 function renderChart(series) {
   const withSpy = series.filter((p) => p.spy_price != null);
@@ -29,20 +72,12 @@ function renderChart(series) {
 
   const data = {
     labels,
-    datasets: [
-      { label: "Bot", data: botPct, borderColor: "#58a6ff", backgroundColor: "rgba(88,166,255,.1)", fill: true, tension: 0.15, pointRadius: 0, borderWidth: 2 },
-      { label: "SPY", data: spyPct, borderColor: "#8b949e", borderDash: [5, 4], fill: false, tension: 0.15, pointRadius: 0, borderWidth: 1.5 },
-    ],
+    datasets: [lineDataset("Bot", botPct), spyDataset("SPY", spyPct)],
   };
-  const opts = {
-    responsive: true,
-    interaction: { mode: "index", intersect: false },
-    scales: {
-      x: { ticks: { color: "#8b949e", maxTicksLimit: 8 }, grid: { color: "#2a323c" } },
-      y: { ticks: { color: "#8b949e", callback: (v) => v + "%" }, grid: { color: "#2a323c" } },
-    },
-    plugins: { legend: { labels: { color: "#e6edf3" } }, tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${c.parsed.y == null ? "—" : c.parsed.y.toFixed(2) + "%"}` } } },
-  };
+  const opts = chartOpts(
+    (v) => v + "%",
+    (c) => `${c.dataset.label}: ${c.parsed.y == null ? "—" : (c.parsed.y >= 0 ? "+" : "") + c.parsed.y.toFixed(2) + "%"}`
+  );
   if (chart) {
     chart.data = data;
     chart.options = opts;
@@ -66,23 +101,12 @@ function renderValueChart(series) {
 
   const data = {
     labels,
-    datasets: [
-      { label: "Portfolio", data: botVal, borderColor: "#58a6ff", backgroundColor: "rgba(88,166,255,.1)", fill: true, tension: 0.15, pointRadius: 0, borderWidth: 2 },
-      { label: "SPY equivalent", data: spyVal, borderColor: "#8b949e", borderDash: [5, 4], fill: false, tension: 0.15, pointRadius: 0, borderWidth: 1.5 },
-    ],
+    datasets: [lineDataset("Portfolio", botVal), spyDataset("SPY equivalent", spyVal)],
   };
-  const opts = {
-    responsive: true,
-    interaction: { mode: "index", intersect: false },
-    scales: {
-      x: { ticks: { color: "#8b949e", maxTicksLimit: 8 }, grid: { color: "#2a323c" } },
-      y: { ticks: { color: "#8b949e", callback: (v) => fmtMoney(v) }, grid: { color: "#2a323c" } },
-    },
-    plugins: {
-      legend: { labels: { color: "#e6edf3" } },
-      tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${c.parsed.y == null ? "—" : fmtMoney(c.parsed.y)}` } },
-    },
-  };
+  const opts = chartOpts(
+    (v) => fmtMoney(v),
+    (c) => `${c.dataset.label}: ${c.parsed.y == null ? "—" : fmtMoney(c.parsed.y)}`
+  );
   if (valueChart) {
     valueChart.data = data;
     valueChart.options = opts;
@@ -133,7 +157,7 @@ function renderTrades(rows) {
               : '<span class="muted">—</span>';
           return `<tr>
             <td>${fmtTime(t.ts)}</td>
-            <td class="${isSell ? "sell" : "buy"}">${t.side.toUpperCase()}</td>
+            <td><span class="${isSell ? "sell" : "buy"}">${t.side.toUpperCase()}</span></td>
             <td>${t.symbol}</td>
             <td>${fmtNum(t.qty)}</td>
             <td>${fmtMoney(t.price)}</td>
@@ -163,42 +187,32 @@ function renderLeaderboard(lb) {
   fill("worst", lb.worst || []);
 }
 
+// Set text and color (pos/neg) without disturbing the element's base classes.
+function setColored(id, text, sign) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.classList.remove("pos", "neg");
+  const c = signClass(sign);
+  if (c) el.classList.add(c);
+}
+
 function renderSummary(s) {
   document.getElementById("title").textContent = s.label || "Random Bot";
   document.getElementById("equity").textContent = fmtMoney(s.equity);
   document.getElementById("cash").textContent = fmtMoney(s.cash);
 
-  const botEl = document.getElementById("botReturn");
-  botEl.textContent = fmtPct(s.bot_return);
-  botEl.className = "value " + signClass(s.bot_return);
-
-  const spyEl = document.getElementById("spyReturn");
-  spyEl.textContent = fmtPct(s.spy_return);
-  spyEl.className = "value " + signClass(s.spy_return);
+  setColored("botReturn", fmtPct(s.bot_return), s.bot_return);
+  setColored("spyReturn", fmtPct(s.spy_return), s.spy_return);
 
   const alpha = s.bot_return != null && s.spy_return != null ? s.bot_return - s.spy_return : null;
-  const alphaEl = document.getElementById("alpha");
-  alphaEl.textContent = fmtPct(alpha);
-  alphaEl.className = "value " + signClass(alpha);
+  setColored("alpha", fmtPct(alpha), alpha);
+  setColored("realized", s.realized_pnl == null ? "—" : fmtMoney(s.realized_pnl), s.realized_pnl);
+  setColored("unrealized", s.unrealized_pnl == null ? "—" : fmtMoney(s.unrealized_pnl), s.unrealized_pnl);
+  setColored("totalPnl", s.total_pnl == null ? "—" : fmtMoney(s.total_pnl), s.total_pnl);
 
-  const realizedEl = document.getElementById("realized");
-  realizedEl.textContent = s.realized_pnl == null ? "—" : fmtMoney(s.realized_pnl);
-  realizedEl.className = "value " + signClass(s.realized_pnl);
-
-  const unrealEl = document.getElementById("unrealized");
-  unrealEl.textContent = s.unrealized_pnl == null ? "—" : fmtMoney(s.unrealized_pnl);
-  unrealEl.className = "value " + signClass(s.unrealized_pnl);
-
-  const totalEl = document.getElementById("totalPnl");
-  totalEl.textContent = s.total_pnl == null ? "—" : fmtMoney(s.total_pnl);
-  totalEl.className = "value " + signClass(s.total_pnl);
-
-  const winEl = document.getElementById("winRate");
-  winEl.textContent =
+  document.getElementById("winRate").textContent =
     s.win_rate == null ? "—" : `${(s.win_rate * 100).toFixed(0)}% (${s.n_wins}/${s.n_wins + s.n_losses})`;
-
   document.getElementById("fees").textContent = s.fees_total == null ? "—" : fmtMoney(s.fees_total);
-
   document.getElementById("updated").textContent = s.last_ts ? "updated " + fmtTime(s.last_ts) : "no data yet";
 }
 
@@ -253,8 +267,10 @@ async function refresh() {
     renderPositions(positions);
     renderTrades(trades);
     renderLeaderboard(leaderboard);
+    document.getElementById("statusDot").classList.remove("err");
   } catch (e) {
     document.getElementById("updated").textContent = "connection error — retrying";
+    document.getElementById("statusDot").classList.add("err");
     console.error(e);
   }
 }
