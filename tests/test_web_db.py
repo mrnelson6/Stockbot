@@ -30,6 +30,25 @@ class TestMetrics:
         assert metrics.volatility([0.01]) is None
         assert metrics.sharpe([0.01, 0.02, -0.01]) is not None
 
+    def test_period_return_uses_value_at_cutoff(self):
+        # value 100 @ t=1000, 110 @ t=2000, 120 @ t=3000 (latest).
+        pts = [(1_000, 100.0), (2_000, 110.0), (3_000, 120.0)]
+        # Cutoff at t=2000 -> baseline 110 -> 120/110 - 1.
+        assert metrics.period_return(pts, 2_000) == pytest.approx(120 / 110 - 1)
+        # Cutoff between points takes the last value at or before it.
+        assert metrics.period_return(pts, 2_500) == pytest.approx(120 / 110 - 1)
+
+    def test_period_return_anchors_to_inception_when_cutoff_predates(self):
+        pts = [(1_000, 100.0), (2_000, 120.0)]
+        # Cutoff before all history -> baseline = first value (since inception).
+        assert metrics.period_return(pts, 0) == pytest.approx(0.20)
+
+    def test_period_return_skips_null_values(self):
+        # SPY price missing for some snapshots; baseline/latest skip the Nones.
+        pts = [(1_000, None), (2_000, 400.0), (3_000, None), (4_000, 440.0)]
+        assert metrics.period_return(pts, 2_000) == pytest.approx(0.10)
+        assert metrics.period_return([(1, None), (2, None)], 1) is None
+
 
 class TestFees:
     def test_estimate_fees(self):
@@ -145,6 +164,32 @@ def test_snapshot_and_returns(tmp_path):
     assert s["start_equity"] == 100_000.0
     assert abs(s["bot_return"] - 0.10) < 1e-9   # 100k -> 110k
     assert abs(s["spy_return"] - 0.05) < 1e-9   # 400 -> 420
+
+
+def test_period_returns_windows():
+    # now = 2026-06-30 12:00 UTC. Snapshots: ~1y ago, ~1w ago, start-of-today, now.
+    DAY = 86_400_000
+    now = 1_782_820_800_000  # 2026-06-30T12:00:00Z
+    snaps = [
+        (now - 400 * DAY, 100_000.0, 400.0),  # before the 1Y window
+        (now - 8 * DAY, 110_000.0, 420.0),     # before the 1W window
+        (now - DAY, 120_000.0, 440.0),         # yesterday (today's baseline)
+        (now, 132_000.0, 462.0),               # latest
+    ]
+    by_key = {p["key"]: p for p in db._period_returns(snaps, now=now)}
+    # Today: 132k vs yesterday's 120k = +10%; SPY 462 vs 440 = +5%.
+    assert by_key["1d"]["bot"] == pytest.approx(0.10)
+    assert by_key["1d"]["spy"] == pytest.approx(0.05)
+    # 1W baseline is the 8-day-old snapshot (110k / 420).
+    assert by_key["1w"]["bot"] == pytest.approx(132 / 110 - 1)
+    assert by_key["1w"]["spy"] == pytest.approx(462 / 420 - 1)
+    # 1Y baseline is the oldest snapshot (within a year).
+    assert by_key["1y"]["bot"] == pytest.approx(0.32)
+    # 5Y window predates all history -> anchors to inception (same as 1Y here).
+    assert by_key["5y"]["bot"] == pytest.approx(0.32)
+    assert [p["label"] for p in db._period_returns(snaps, now=now)] == [
+        "Today", "1W", "1M", "YTD", "1Y", "5Y"
+    ]
 
 
 def test_snapshot_handles_missing_spy(tmp_path):

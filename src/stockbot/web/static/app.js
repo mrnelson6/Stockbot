@@ -216,6 +216,23 @@ function renderSummary(s) {
   document.getElementById("updated").textContent = s.last_ts ? "updated " + fmtTime(s.last_ts) : "no data yet";
 }
 
+function renderPeriods(periods) {
+  const el = document.getElementById("periods");
+  if (!periods || !periods.length) {
+    el.innerHTML = `<div class="muted">No data yet</div>`;
+    return;
+  }
+  el.innerHTML = periods
+    .map(
+      (p) => `<div class="period">
+        <div class="pk">${p.label}</div>
+        <div class="pv ${signClass(p.bot)}">${fmtPct(p.bot)}</div>
+        <div class="pspy">SPY <b class="${signClass(p.spy)}">${fmtPct(p.spy)}</b></div>
+      </div>`
+    )
+    .join("");
+}
+
 const fmtRatio = (v) => (v == null ? "—" : v.toFixed(2));
 const fmtPctPlain = (v) => (v == null ? "—" : (v * 100).toFixed(1) + "%");
 const fmtDays = (ms) => {
@@ -261,6 +278,7 @@ async function refresh() {
       getJSON("/api/leaderboard?n=5"),
     ]);
     renderSummary(summary);
+    renderPeriods(summary.period_returns);
     renderStats(summary);
     renderChart(equity);
     renderValueChart(equity);

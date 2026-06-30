@@ -111,3 +111,51 @@ def active_days(first_ts_ms: int | None, last_ts_ms: int | None) -> float:
     if not first_ts_ms or not last_ts_ms or last_ts_ms <= first_ts_ms:
         return 1.0
     return max(1.0, (last_ts_ms - first_ts_ms) / _MS_PER_DAY)
+
+
+def _latest_value(points: list[tuple[int, float | None]]) -> float | None:
+    """Most recent non-null value in a (ts, value) series sorted ascending."""
+    for _, v in reversed(points):
+        if v is not None:
+            return v
+    return None
+
+
+def _value_at(points: list[tuple[int, float | None]], cutoff_ms: int) -> float | None:
+    """Value as of ``cutoff_ms``: the last non-null value at or before the cutoff.
+
+    If the cutoff predates the series (we have no history that far back), anchor
+    to the earliest available value instead, so a window longer than the bot's
+    lifetime reads as a since-inception return (like a young stock's "5Y").
+    """
+    chosen = None
+    for ts, v in points:
+        if v is None:
+            continue
+        if ts <= cutoff_ms:
+            chosen = v
+        else:
+            break
+    if chosen is not None:
+        return chosen
+    # Cutoff predates all history: anchor to the earliest non-null value.
+    for _, v in points:
+        if v is not None:
+            return v
+    return None
+
+
+def period_return(
+    points: list[tuple[int, float | None]], cutoff_ms: int
+) -> float | None:
+    """Fractional return from the value as of ``cutoff_ms`` to the latest value.
+
+    ``points`` is a (ts_ms, value) series sorted ascending; values may be None
+    (e.g. SPY price missing for a snapshot) and are skipped. Returns None if
+    there's no usable baseline or it's non-positive.
+    """
+    base = _value_at(points, cutoff_ms)
+    latest = _latest_value(points)
+    if base and latest is not None and base > 0:
+        return latest / base - 1.0
+    return None

@@ -15,6 +15,7 @@ import os
 import sqlite3
 import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
@@ -401,6 +402,50 @@ def get_equity_series(
     return [dict(r) for r in rows]
 
 
+_DAY_MS = 86_400_000
+
+
+def _period_returns(
+    snapshots: list[tuple[int, float, Optional[float]]],
+    now: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    """Stock-style trailing returns for the bot and SPY over standard windows.
+
+    ``snapshots`` is (ts_ms, equity, spy_price) sorted ascending. Each window's
+    baseline is the value as of its cutoff; windows that reach before the bot's
+    inception fall back to the first snapshot (so they read as since-inception,
+    like a young stock's "5Y"). Returns one entry per window, in display order.
+    """
+    if not snapshots:
+        return []
+    now = now if now is not None else now_ms()
+    dt = datetime.fromtimestamp(now / 1000, tz=timezone.utc)
+    today_start = int(datetime(dt.year, dt.month, dt.day, tzinfo=timezone.utc).timestamp() * 1000)
+    year_start = int(datetime(dt.year, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+
+    # (key, label, cutoff_ms). "Today" / "YTD" use the start of the period minus
+    # 1ms so the baseline is the prior period's last value (a "previous close").
+    windows = [
+        ("1d", "Today", today_start - 1),
+        ("1w", "1W", now - 7 * _DAY_MS),
+        ("1m", "1M", now - 30 * _DAY_MS),
+        ("ytd", "YTD", year_start - 1),
+        ("1y", "1Y", now - 365 * _DAY_MS),
+        ("5y", "5Y", now - 5 * 365 * _DAY_MS),
+    ]
+    eq_points = [(ts, eq) for ts, eq, _ in snapshots]
+    spy_points = [(ts, spy) for ts, _, spy in snapshots]
+    return [
+        {
+            "key": key,
+            "label": label,
+            "bot": metrics.period_return(eq_points, cutoff),
+            "spy": metrics.period_return(spy_points, cutoff),
+        }
+        for key, label, cutoff in windows
+    ]
+
+
 def get_summary(path: str | Path) -> dict[str, Any]:
     """Headline numbers and full performance analytics for the dashboard.
 
@@ -429,10 +474,13 @@ def get_summary(path: str | Path) -> dict[str, Any]:
                 "WHERE side='SELL' AND realized_pnl IS NOT NULL ORDER BY ts ASC, id ASC"
             )
         ]
-        equity_curve = [
-            (r["ts"], r["equity"])
-            for r in conn.execute("SELECT ts, equity FROM equity_snapshots ORDER BY ts ASC")
+        snapshots = [
+            (r["ts"], r["equity"], r["spy_price"])
+            for r in conn.execute(
+                "SELECT ts, equity, spy_price FROM equity_snapshots ORDER BY ts ASC"
+            )
         ]
+    equity_curve = [(ts, eq) for ts, eq, _ in snapshots]
 
     realized_list = [s["realized_pnl"] for s in sells]
     wins = sum(1 for r in realized_list if r > 0)
@@ -505,6 +553,7 @@ def get_summary(path: str | Path) -> dict[str, Any]:
         "cash_pct": (last["cash"] / equity) if (last and equity) else None,
         "invested_pct": (total_mv / equity) if equity else None,
     }
+    summary["period_returns"] = _period_returns(snapshots)
     if first and last and start_equity:
         summary["bot_return"] = equity / start_equity - 1.0
         summary["total_pnl_pct"] = summary["total_pnl"] / start_equity
