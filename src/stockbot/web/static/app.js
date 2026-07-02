@@ -262,6 +262,7 @@ function renderStats(s) {
   setStat("sWinStreak", s.longest_win_streak ?? "—");
   setStat("sLossStreak", s.longest_loss_streak ?? "—");
   setStat("sHold", fmtDays(s.avg_hold_ms));
+  setStat("sTrades", s.n_trades == null ? "—" : s.n_trades.toLocaleString("en-US"));
   setStat("sTpd", s.trades_per_day == null ? "—" : s.trades_per_day.toFixed(1));
   setStat("sInvested", fmtPctPlain(s.invested_pct));
   setStat("sCashPct", fmtPctPlain(s.cash_pct));
