@@ -41,6 +41,10 @@ class TestConstruction:
         with pytest.raises(ValueError):
             RandomAllocator(max_position_fraction=1.5)
 
+    def test_rejects_negative_min_buy(self):
+        with pytest.raises(ValueError):
+            RandomAllocator(min_buy=-1.0)
+
 
 class TestShouldTrade:
     def test_frequency_matches_trade_prob(self):
@@ -136,6 +140,39 @@ class TestPlanTrade:
         holdings = {Symbol("AAPL"): 10, Symbol("MSFT"): 5}
         intent = alloc.plan_trade(holdings, PRICES, cash=50_000.0, universe=UNIVERSE)
         assert intent.sells == {}
+
+    def test_min_buy_floors_every_slice(self):
+        # $100 floor: no emitted buy target may fall below it.
+        alloc = make_allocator(min_buy=100.0, deploy_fraction_range=(1.0, 1.0),
+                               max_position_fraction=1.0)
+        for _ in range(50):
+            intent = alloc.plan_trade({}, PRICES, cash=1_000.0, universe=UNIVERSE)
+            assert all(v >= 100.0 for v in intent.buys.values())
+
+    def test_min_buy_limits_fragmentation(self):
+        # $1,000 cash with a $100 floor can fund at most 10 names, even though the
+        # universe is larger and max_buys would otherwise allow the full spread.
+        alloc = make_allocator(min_buy=100.0, min_buys=8, max_buys=8,
+                               deploy_fraction_range=(1.0, 1.0), max_position_fraction=1.0)
+        for _ in range(20):
+            intent = alloc.plan_trade({}, PRICES, cash=1_000.0, universe=UNIVERSE)
+            assert len(intent.buys) <= 10
+            assert all(v >= 100.0 for v in intent.buys.values())
+
+    def test_min_buy_holds_when_cash_below_floor(self):
+        # Deployable cash under one floor-sized buy -> nothing is bought, cash held.
+        alloc = make_allocator(min_buy=100.0, deploy_fraction_range=(1.0, 1.0),
+                               max_position_fraction=1.0)
+        intent = alloc.plan_trade({}, PRICES, cash=60.0, universe=UNIVERSE)
+        assert intent.buys == {}
+
+    def test_min_buy_zero_keeps_small_slices(self):
+        # Floor disabled (default): small Dirichlet slices are still emitted.
+        alloc = make_allocator(min_buy=0.0, min_buys=8, max_buys=8,
+                               deploy_fraction_range=(1.0, 1.0), max_position_fraction=1.0)
+        intent = alloc.plan_trade({}, PRICES, cash=1_000.0, universe=UNIVERSE)
+        assert len(intent.buys) == len(UNIVERSE)  # fully fragmented, some under $100
+        assert any(v < 100.0 for v in intent.buys.values())
 
     def test_determinism_same_seed(self):
         a = make_allocator(seed=7)

@@ -52,6 +52,7 @@ class RandomAllocator:
         max_buys: int = 5,
         deploy_fraction_range: tuple[float, float] = (0.9, 1.0),
         max_position_fraction: float = 0.2,
+        min_buy: float = 0.0,
         seed: int | None = None,
     ) -> None:
         """Initialize the allocator.
@@ -66,6 +67,11 @@ class RandomAllocator:
             max_position_fraction: Cap on each position as a fraction (0..1) of the
                 account's total value, e.g. 0.2 = no single buy targets more than
                 20% of equity. The dollar cap scales with the account automatically.
+            min_buy: Dollar floor on individual buys. Buy slices below this are not
+                emitted, and the number of names bought is capped so a small pool of
+                cash isn't fragmented into sub-floor dust. 0 (default) disables the
+                floor. Any leftover cash simply stays uninvested until a later event
+                can place it in a buy of at least ``min_buy``.
             seed: Optional RNG seed for reproducibility.
         """
         if not 0.0 <= trade_prob <= 1.0:
@@ -79,6 +85,8 @@ class RandomAllocator:
             raise ValueError(f"deploy_fraction_range must be 0<=low<=high<=1, got {deploy_fraction_range}")
         if not 0.0 < max_position_fraction <= 1.0:
             raise ValueError(f"max_position_fraction must be in (0, 1], got {max_position_fraction}")
+        if min_buy < 0.0:
+            raise ValueError(f"min_buy must be >= 0, got {min_buy}")
 
         self._trade_prob = trade_prob
         self._churn_sell_prob = churn_sell_prob
@@ -86,6 +94,7 @@ class RandomAllocator:
         self._max_buys = max_buys
         self._deploy_low, self._deploy_high = low, high
         self._max_position_fraction = max_position_fraction
+        self._min_buy = min_buy
         self._rng = np.random.default_rng(seed)
 
     def should_trade(self) -> bool:
@@ -155,6 +164,13 @@ class RandomAllocator:
         k = int(self._rng.integers(self._min_buys, self._max_buys + 1))
         if cap > 0:
             k = max(k, int(np.ceil(deployable / cap)))
+        # Buy floor: don't split `deployable` into more slices than can each clear
+        # `min_buy`, so a modest pool of cash becomes a few real buys rather than a
+        # spray of sub-floor dust. This caps k *after* the position-cap lower bound,
+        # so the floor wins when the two conflict (fewer, larger buys). If there
+        # isn't even enough cash for one buy at the floor, k drops to 0 and we hold.
+        if self._min_buy > 0:
+            k = min(k, int(deployable // self._min_buy))
         k = min(k, len(candidates))
         if k <= 0:
             return intent
@@ -167,7 +183,11 @@ class RandomAllocator:
         # weights, water-filling overflow from capped names onto the others so
         # the full amount lands (up to total capacity = k * cap).
         for symbol, target_value in self._water_fill(chosen, weights, deployable, cap).items():
-            if target_value > 0:
+            # Drop any slice below the floor: Dirichlet weights are uneven, so even
+            # with k capped a single slice can land under `min_buy`. The executor
+            # enforces the same floor at fill time (buying power can shrink a slice),
+            # but keeping the intent clean avoids noisy skip logs downstream.
+            if target_value >= self._min_buy and target_value > 0:
                 intent.buys[symbol] = target_value
 
         return intent

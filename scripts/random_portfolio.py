@@ -102,6 +102,7 @@ class RandomPortfolioTrader:
         fractional: bool = True,
         pdt_guard: bool = True,
         pdt_threshold: float = PDT_EQUITY_THRESHOLD,
+        min_buy: float = 0.0,
     ) -> None:
         self._symbols = symbols
         self._allocator = allocator
@@ -111,6 +112,9 @@ class RandomPortfolioTrader:
         self._fractional = fractional
         self._pdt_guard = pdt_guard
         self._pdt_threshold = pdt_threshold
+        # Dollar floor on individual buys (hard guarantee at fill time). Never below
+        # Alpaca's ~$1 fractional minimum.
+        self._min_buy = max(1.0, min_buy)
 
         self._config = load_random_alpaca_config()
         self._data_provider = AlpacaDataProvider(self._config, feed=feed)
@@ -257,10 +261,12 @@ class RandomPortfolioTrader:
             if price <= 0:
                 continue
             budget = min(target_value, buying_power * 0.95 - spent)
+            # Minimum-purchase floor: skip anything we couldn't fund up to the floor
+            # (buying power may have shrunk the slice below the allocator's target).
+            if budget < self._min_buy:
+                print(f"    SKIP {symbol:6} - under ${self._min_buy:,.0f} minimum")
+                continue
             if self._fractional:
-                if budget < 1.0:  # Alpaca's fractional minimum is ~$1 notional
-                    print(f"    SKIP {symbol:6} - under $1 fractional minimum")
-                    continue
                 shares = round(budget / price, 6)
             else:
                 shares = float(int(budget / price))
@@ -270,6 +276,10 @@ class RandomPortfolioTrader:
             if shares <= 0:
                 continue
             cost = shares * price
+            # Whole-share rounding can land the cost back under the floor.
+            if cost < self._min_buy:
+                print(f"    SKIP {symbol:6} - ${cost:,.0f} under ${self._min_buy:,.0f} minimum")
+                continue
             qty_str = _fmt_qty(shares)
             if not self._execute or not self._broker:
                 self._sim_cash -= cost
@@ -476,10 +486,24 @@ def main() -> int:
         "--lookback-days", type=int, default=30, help="[alpaca] Days of daily bars used to gauge liquidity"
     )
     parser.add_argument("--poll-interval", type=float, default=180.0, help="Seconds between ticks")
-    parser.add_argument("--trade-prob", type=float, default=0.1, help="Per-tick probability of trading")
+    parser.add_argument(
+        "--trade-prob",
+        type=float,
+        default=0.01,
+        help="Per-tick probability of trading. At the default 180s poll this averages "
+        "~2 trades/day; raise it for a busier bot.",
+    )
     parser.add_argument("--churn-sell-prob", type=float, default=0.3, help="Per-holding sell probability per event")
     parser.add_argument("--min-buys", type=int, default=1)
     parser.add_argument("--max-buys", type=int, default=5)
+    parser.add_argument(
+        "--min-buy",
+        type=float,
+        default=100.0,
+        help="Dollar floor on individual buys: never place a buy smaller than this "
+        "(default $100). Cash too small to fund one buy at the floor is held until a "
+        "later event can deploy it. Set 0 to disable.",
+    )
     parser.add_argument("--deploy-min", type=float, default=0.9, help="Min fraction of cash deployed per event")
     parser.add_argument("--deploy-max", type=float, default=1.0, help="Max fraction of cash deployed per event")
     parser.add_argument(
@@ -551,6 +575,7 @@ def main() -> int:
         max_buys=args.max_buys,
         deploy_fraction_range=(args.deploy_min, args.deploy_max),
         max_position_fraction=args.max_position_pct,
+        min_buy=args.min_buy,
         seed=args.seed,
     )
 
@@ -580,6 +605,7 @@ def main() -> int:
         fractional=args.fractional,
         pdt_guard=args.pdt_guard,
         pdt_threshold=args.pdt_threshold,
+        min_buy=args.min_buy,
     )
     trader.run(poll_interval=args.poll_interval)
     return 0
