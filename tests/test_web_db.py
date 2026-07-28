@@ -1,5 +1,7 @@
 """Tests for the dashboard SQLite persistence layer."""
 
+from datetime import datetime, timezone
+
 import pytest
 
 from stockbot.web import accounting, db, metrics
@@ -190,6 +192,26 @@ def test_period_returns_windows():
     assert [p["label"] for p in db._period_returns(snaps, now=now)] == [
         "Today", "1W", "1M", "YTD", "1Y", "5Y"
     ]
+
+
+def test_today_persists_through_evening_after_utc_rollover():
+    # "Today" is anchored to market time (Eastern), not UTC. A user in Pacific who
+    # checks at 7pm is already on the *next* UTC calendar day, but the session that
+    # just closed is still "today" in Eastern -- so the figure must survive, not
+    # reset to 0%. Regression for the post-close reset bug.
+    def ms(y, mo, d, h=0, mi=0):
+        return int(datetime(y, mo, d, h, mi, tzinfo=timezone.utc).timestamp() * 1000)
+
+    snaps = [
+        (ms(2026, 7, 24, 20, 0), 100_000.0, 400.0),  # Fri 4pm ET close -> today's baseline
+        (ms(2026, 7, 27, 13, 30), 101_000.0, 404.0),  # Mon 9:30am ET open
+        (ms(2026, 7, 27, 20, 0), 105_000.0, 420.0),   # Mon 4pm ET close (latest)
+    ]
+    # Mon 7pm Pacific == Tue 02:00 UTC: UTC has rolled over, Eastern is still Monday.
+    now = ms(2026, 7, 28, 2, 0)
+    today = {p["key"]: p for p in db._period_returns(snaps, now=now)}["1d"]
+    assert today["bot"] == pytest.approx(0.05)  # 105k vs Friday's 100k, not 0%
+    assert today["spy"] == pytest.approx(0.05)  # 420 vs 400
 
 
 def test_snapshot_handles_missing_spy(tmp_path):

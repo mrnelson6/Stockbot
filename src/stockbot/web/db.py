@@ -21,6 +21,17 @@ from typing import Any, Iterator, Optional
 
 from stockbot.web import accounting, metrics
 
+# Trading-calendar timezone. "Today"/"YTD" day boundaries are anchored to US market
+# time, not UTC, so an evening check (e.g. 7pm Pacific, already the next UTC day)
+# still reports the session that just closed instead of resetting to 0%. Falls back
+# to UTC on a box without tzdata (matches random_bot.pdt.market_date).
+try:
+    from zoneinfo import ZoneInfo
+
+    _MARKET_TZ: Any = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover - bare box without tzdata
+    _MARKET_TZ = timezone.utc
+
 # Bump when the accounting algorithm changes to force a one-time rebuild.
 _ACCOUNTING_VERSION = "2"
 
@@ -419,9 +430,13 @@ def _period_returns(
     if not snapshots:
         return []
     now = now if now is not None else now_ms()
-    dt = datetime.fromtimestamp(now / 1000, tz=timezone.utc)
-    today_start = int(datetime(dt.year, dt.month, dt.day, tzinfo=timezone.utc).timestamp() * 1000)
-    year_start = int(datetime(dt.year, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    # Anchor day/year boundaries to market time (Eastern), not UTC: the trading
+    # session and the user's calendar day roll over on Eastern midnight, so "Today"
+    # keeps showing the day's move all evening instead of zeroing out once UTC ticks
+    # past midnight (~5pm Pacific).
+    dt = datetime.fromtimestamp(now / 1000, tz=_MARKET_TZ)
+    today_start = int(datetime(dt.year, dt.month, dt.day, tzinfo=_MARKET_TZ).timestamp() * 1000)
+    year_start = int(datetime(dt.year, 1, 1, tzinfo=_MARKET_TZ).timestamp() * 1000)
 
     # (key, label, cutoff_ms). "Today" / "YTD" use the start of the period minus
     # 1ms so the baseline is the prior period's last value (a "previous close").
