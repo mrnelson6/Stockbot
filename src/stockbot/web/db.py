@@ -395,7 +395,7 @@ def get_positions(path: str | Path) -> list[dict[str, Any]]:
         lot_agg = {
             r["symbol"]: dict(r)
             for r in conn.execute(
-                "SELECT symbol, SUM(qty*price) AS cost_total, SUM(qty) AS lots_qty, "
+                "SELECT symbol, SUM(qty) AS lots_qty, "
                 "MIN(opened_ts) AS acquired_first, MAX(opened_ts) AS acquired_last, "
                 "COUNT(*) AS n_lots FROM lots GROUP BY symbol"
             )
@@ -403,16 +403,18 @@ def get_positions(path: str | Path) -> list[dict[str, Any]]:
 
     for p in positions:
         agg = lot_agg.get(p["symbol"])
+        # Cost basis and unrealized P&L come from the broker's actual average entry
+        # price (which reflects real fills), NOT our recorded-quote lots -- so the
+        # unrealized figure reconciles with the account instead of drifting by the
+        # bid-ask spread. Acquisition dates / lot count still come from our own
+        # trade history (the broker doesn't track when *we* opened each lot).
+        cost_per_share = float(p["avg_price"])
+        cost_total = cost_per_share * float(p["qty"])
         if agg and agg["lots_qty"] and agg["lots_qty"] > 0:
-            cost_total = float(agg["cost_total"])
-            cost_per_share = cost_total / float(agg["lots_qty"])
             p["acquired_first_ts"] = agg["acquired_first"]
             p["acquired_last_ts"] = agg["acquired_last"]
             p["n_lots"] = agg["n_lots"]
         else:
-            # No lots (e.g. pre-existing shares) -> fall back to broker avg price.
-            cost_per_share = p["avg_price"]
-            cost_total = p["avg_price"] * p["qty"]
             p["acquired_first_ts"] = p["updated_ts"]
             p["acquired_last_ts"] = p["updated_ts"]
             p["n_lots"] = 1

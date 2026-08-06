@@ -387,6 +387,28 @@ def test_positions_enriched_with_cost_basis(tmp_path):
     assert pos["n_lots"] == 2
 
 
+def test_unrealized_uses_broker_cost_basis_not_recorded_lots(tmp_path):
+    # Recorded lots carry quote prices ($100/$120 -> avg 110); the broker's real
+    # average entry is $112 (actual fills). Unrealized P&L must follow the broker,
+    # not the recorded lots, so it reconciles with the account.
+    p = tmp_path / "dash.db"
+    db.init_db(p)
+    db.insert_trade(p, symbol="AAPL", side="BUY", qty=10, price=100.0, ts=1_000)
+    db.insert_trade(p, symbol="AAPL", side="BUY", qty=10, price=120.0, ts=2_000)
+    db.replace_positions(
+        p,
+        [{"symbol": "AAPL", "qty": 20, "avg_price": 112.0, "market_value": 2600.0, "unrealized_pnl": 360.0}],
+        ts=3_000,
+    )
+    pos = db.get_positions(p)[0]
+    assert pos["cost_basis_per_share"] == pytest.approx(112.0)     # broker avg, not 110
+    assert pos["cost_basis_total"] == pytest.approx(2240.0)        # 112 * 20
+    assert pos["unrealized_pnl"] == pytest.approx(360.0)           # 2600 - 2240, not 400
+    # Acquisition metadata still comes from our own trade history.
+    assert pos["acquired_first_ts"] == 1_000 and pos["n_lots"] == 2
+    assert db.get_summary(p)["unrealized_pnl"] == pytest.approx(360.0)
+
+
 def test_backfill_rebuilds_accounting_for_legacy_rows(tmp_path):
     p = tmp_path / "dash.db"
     db.init_db(p)
