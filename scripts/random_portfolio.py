@@ -35,7 +35,15 @@ from dotenv import load_dotenv
 from stockbot.config.settings import AlpacaConfig
 from stockbot.config.universe import get_universe
 from stockbot.core.models import Order
-from stockbot.core.types import OrderSide, OrderType, Price, Quantity, Symbol, Timestamp
+from stockbot.core.types import (
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    Price,
+    Quantity,
+    Symbol,
+    Timestamp,
+)
 from stockbot.data.providers.alpaca import AlpacaDataProvider
 from stockbot.execution.broker_alpaca import AlpacaBroker
 from stockbot.monitoring import setup_logging
@@ -115,6 +123,13 @@ class RandomPortfolioTrader:
         # Dollar floor on individual buys (hard guarantee at fill time). Never below
         # Alpaca's ~$1 fractional minimum.
         self._min_buy = max(1.0, min_buy)
+
+        # After submitting a market order we poll for the actual fill so trades are
+        # recorded at the real execution price (not the pre-trade quote). Market
+        # orders in liquid names fill in well under a second; a few short polls
+        # covers it without stalling the tick.
+        self._fill_poll_attempts = 8
+        self._fill_poll_interval = 0.4
 
         self._config = load_random_alpaca_config()
         self._data_provider = AlpacaDataProvider(self._config, feed=feed)
@@ -206,6 +221,40 @@ class RandomPortfolioTrader:
 
     # -- execution -----------------------------------------------------------
 
+    def _resolve_fill(
+        self, order_id: str, fallback_price: float, fallback_qty: float
+    ) -> Optional[tuple[float, float]]:
+        """Poll the broker for an order's actual ``(qty, avg_price)``.
+
+        Returns the real fill so trades record at the executed price instead of
+        the pre-trade quote. Returns None if the broker confirms the order reached
+        a terminal non-filled state (rejected/cancelled/expired), so the caller
+        skips recording a phantom trade -- a recorded buy the account never
+        actually held was the source of a lingering ghost position. Falls back to
+        ``(fallback_qty, fallback_price)`` only if the order is still pending after
+        the wait (rare for a market order in a liquid name), rather than dropping a
+        trade that will likely fill momentarily.
+        """
+        if not self._broker:
+            return fallback_qty, fallback_price
+        for _ in range(self._fill_poll_attempts):
+            got = self._broker.get_fill(order_id)
+            if got:
+                return got
+            time.sleep(self._fill_poll_interval)
+        # No fill seen in the poll window. Distinguish "still pending" from
+        # "definitively didn't fill" via the order's terminal status.
+        status = self._broker.get_order_status(order_id)
+        if status in (OrderStatus.REJECTED, OrderStatus.CANCELLED):
+            logger.warning(f"Order {order_id} {status.name.lower()} - not recording.")
+            return None
+        logger.warning(
+            f"No fill reported for order {order_id} after "
+            f"{self._fill_poll_attempts * self._fill_poll_interval:.1f}s "
+            f"(status={status.name.lower()}); recording at quote price ${fallback_price:.2f}."
+        )
+        return fallback_qty, fallback_price
+
     def _execute_intent(self, intent, prices: dict[str, float]) -> None:
         """Turn a TradeIntent into orders (or simulate them in dry-run mode)."""
         if intent.is_empty:
@@ -235,8 +284,13 @@ class RandomPortfolioTrader:
                         created_at=Timestamp(int(time.time() * 1_000_000_000)),
                     )
                 )
-                print(f"    SOLD {qty_str:>9} {symbol:6} @ ${price:.2f}")
-                self._record_trade(symbol, "SELL", shares, price, order_id)
+                fill = self._resolve_fill(order_id, fallback_price=price, fallback_qty=shares)
+                if not fill:
+                    print(f"    SELL {symbol:6} not filled - skipping record")
+                    continue
+                fill_qty, fill_price = fill
+                print(f"    SOLD {_fmt_qty(fill_qty):>9} {symbol:6} @ ${fill_price:.2f}")
+                self._record_trade(symbol, "SELL", fill_qty, fill_price, order_id)
             except Exception as e:
                 logger.error(f"Failed to sell {symbol}: {e}")
 
@@ -299,10 +353,17 @@ class RandomPortfolioTrader:
                         created_at=Timestamp(int(time.time() * 1_000_000_000)),
                     )
                 )
-                spent += cost
-                print(f"    BOUGHT {qty_str:>9} {symbol:6} @ ${price:.2f} (${cost:,.0f})")
-                self._record_trade(symbol, "BUY", shares, price, order_id)
-                self._track_buy(symbol, shares)
+                fill = self._resolve_fill(order_id, fallback_price=price, fallback_qty=shares)
+                if not fill:
+                    # Broker confirms nothing filled: don't record a phantom buy.
+                    print(f"    BUY {symbol:6} not filled - skipping record")
+                    continue
+                fill_qty, fill_price = fill
+                fill_cost = fill_qty * fill_price
+                spent += fill_cost
+                print(f"    BOUGHT {_fmt_qty(fill_qty):>9} {symbol:6} @ ${fill_price:.2f} (${fill_cost:,.0f})")
+                self._record_trade(symbol, "BUY", fill_qty, fill_price, order_id)
+                self._track_buy(symbol, fill_qty)
             except Exception as e:
                 logger.error(f"Failed to buy {symbol}: {e}")
 

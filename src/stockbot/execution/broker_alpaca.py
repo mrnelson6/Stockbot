@@ -214,6 +214,26 @@ class AlpacaBroker:
             logger.warning(f"Failed to get fills for {order_id}: {e}")
             return []
 
+    def get_fill(self, order_id: str) -> Optional[tuple[float, float]]:
+        """Actual ``(filled_qty, filled_avg_price)`` for an order, or None.
+
+        Returns None if the order isn't (yet) filled or the average price is
+        unavailable. Callers use this to record trades at the real execution
+        price instead of the pre-trade quote, so cost basis and realized P&L
+        reconcile with the account instead of drifting by the bid-ask spread.
+        """
+        try:
+            alpaca_id = self._order_mapping.get(order_id, order_id)
+            alpaca_order = self._client.get_order_by_id(alpaca_id)
+            qty = float(alpaca_order.filled_qty or 0)
+            avg = float(alpaca_order.filled_avg_price or 0)
+            if qty > 0 and avg > 0:
+                return qty, avg
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to get fill for {order_id}: {e}")
+            return None
+
     def get_positions(self) -> dict[Symbol, Position]:
         """Get current positions from Alpaca.
 

@@ -282,6 +282,75 @@ def test_realized_pnl_on_sell(tmp_path):
     assert s["avg_hold_ms"] == pytest.approx(25_000 / 15)
 
 
+def test_total_pnl_anchored_to_actual_equity(tmp_path):
+    # Total P&L follows the real account change (equity - start), not the
+    # realized+unrealized estimate, and surfaces the gap as a reconciliation line.
+    p = tmp_path / "dash.db"
+    db.init_db(p)
+    db.insert_snapshot(p, equity=1000.0, cash=1000.0, spy_price=400.0, ts=1_000)
+    db.insert_snapshot(p, equity=1029.0, cash=29.0, spy_price=410.0, ts=2_000)
+    # A closed round trip booked at recorded prices implies +40 realized -- rosier
+    # than the account actually did (only +29), mimicking quote-vs-fill drift.
+    db.insert_trade(p, symbol="AAPL", side="BUY", qty=10, price=100.0, ts=1_100)
+    db.insert_trade(p, symbol="AAPL", side="SELL", qty=10, price=104.0, ts=1_200)
+    s = db.get_summary(p)
+    assert s["total_pnl"] == pytest.approx(29.0)                 # equity - start
+    assert s["realized_pnl"] == pytest.approx(40.0)
+    assert s["unrealized_pnl"] == pytest.approx(0.0)
+    assert s["reconciliation_pnl"] == pytest.approx(29.0 - 40.0)  # -11
+    assert s["total_pnl_pct"] == pytest.approx(0.029)
+
+
+def test_reconcile_drops_phantom_lot(tmp_path):
+    # A recorded BUY the broker never ends up holding leaves a phantom open lot;
+    # a later snapshot without that symbol must purge it. replace_positions runs
+    # the reconcile automatically.
+    p = tmp_path / "dash.db"
+    db.init_db(p)
+    db.insert_trade(p, symbol="SATS", side="BUY", qty=0.5, price=100.0, ts=1_000)
+    db.replace_positions(
+        p,
+        [{"symbol": "AAPL", "qty": 1, "avg_price": 10, "market_value": 10, "unrealized_pnl": 0}],
+        ts=2_000,
+    )
+    with db._connect(p) as conn:
+        q = conn.execute("SELECT COALESCE(SUM(qty),0) AS q FROM lots WHERE symbol='SATS'").fetchone()["q"]
+    assert q == pytest.approx(0.0)
+
+
+def test_reconcile_clips_lots_to_broker_qty(tmp_path):
+    # Lots claim 20 shares but the broker holds 12 -> clip the excess FIFO
+    # (oldest lot first), leaving 12 with the newest cost basis intact.
+    p = tmp_path / "dash.db"
+    db.init_db(p)
+    db.insert_trade(p, symbol="AAPL", side="BUY", qty=10, price=100.0, ts=1_000)
+    db.insert_trade(p, symbol="AAPL", side="BUY", qty=10, price=120.0, ts=2_000)
+    db.replace_positions(
+        p,
+        [{"symbol": "AAPL", "qty": 12, "avg_price": 115, "market_value": 1380, "unrealized_pnl": 0}],
+        ts=3_000,
+    )
+    with db._connect(p) as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT qty, price FROM lots WHERE symbol='AAPL' ORDER BY opened_ts ASC, id ASC"
+        )]
+    assert sum(r["qty"] for r in rows) == pytest.approx(12)
+    assert rows[0]["qty"] == pytest.approx(2) and rows[0]["price"] == 100  # oldest lot clipped
+    assert rows[1]["qty"] == pytest.approx(10) and rows[1]["price"] == 120
+
+
+def test_reconcile_noop_without_broker_snapshot(tmp_path):
+    # No positions snapshot -> no broker truth -> lots left untouched (never nuke
+    # legitimate lots on a fresh DB).
+    p = tmp_path / "dash.db"
+    db.init_db(p)
+    db.insert_trade(p, symbol="AAPL", side="BUY", qty=5, price=100.0, ts=1_000)
+    assert db.reconcile_lots_to_positions(p) == []
+    with db._connect(p) as conn:
+        q = conn.execute("SELECT SUM(qty) AS q FROM lots WHERE symbol='AAPL'").fetchone()["q"]
+    assert q == pytest.approx(5)
+
+
 def test_leaderboard_best_and_worst(tmp_path):
     p = tmp_path / "dash.db"
     db.init_db(p)

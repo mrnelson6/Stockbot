@@ -47,6 +47,10 @@
     <section class="cards">
       <div class="card"><div class="label">Realized P&amp;L</div><div class="value" id="realized">—</div></div>
       <div class="card"><div class="label">Unrealized P&amp;L</div><div class="value" id="unrealized">—</div></div>
+      <div class="card" id="reconcileCard" hidden>
+        <div class="label" title="Difference between the actual account change and the realized+unrealized estimate from recorded trades (spread between quoted and filled prices, etc.)">Reconciliation</div>
+        <div class="value" id="reconcile">—</div>
+      </div>
       <div class="card"><div class="label">Win rate</div><div class="value" id="winRate">—</div></div>
       <div class="card"><div class="label">Est. fees</div><div class="value" id="fees">—</div></div>
     </section>

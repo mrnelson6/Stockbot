@@ -182,6 +182,70 @@ def _rebuild_accounting(conn: sqlite3.Connection) -> None:
                 "INSERT INTO lots(symbol, qty, price, opened_ts) VALUES(?,?,?,?)",
                 (symbol, lot["qty"], lot["price"], lot["opened_ts"]),
             )
+    # Replaying the raw trade log can recreate phantom lots (a recorded buy with no
+    # real holding behind it). Trim them back to the broker's actual positions so a
+    # version-bump rebuild stays consistent. No-op on a fresh DB (no positions yet).
+    _reconcile_lots(conn)
+
+
+def _reconcile_lots(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Trim open FIFO lots so they never claim more shares than the broker holds.
+
+    A phantom lot -- a recorded BUY the account never actually ended up holding
+    (an order that didn't fill, or a position liquidated outside the bot without a
+    matching SELL) -- leaves an open lot with no real shares behind it, misstating
+    cost basis and resurrecting positions that no longer exist. This clips the
+    excess from each symbol's oldest lots (FIFO) down to the broker's actual
+    quantity, dropping lots entirely when the broker holds none.
+
+    The ``positions`` table (last broker snapshot) is the source of truth. If it's
+    empty we have no truth to reconcile against, so this is a no-op -- important so
+    a fresh DB or a mid-rebuild state never nukes legitimate lots.
+
+    Returns one entry per adjusted symbol: {symbol, removed_qty, broker_qty}.
+    """
+    broker_qty = {
+        r["symbol"]: float(r["qty"]) for r in conn.execute("SELECT symbol, qty FROM positions")
+    }
+    if not broker_qty and not conn.execute("SELECT 1 FROM positions LIMIT 1").fetchone():
+        return []  # no broker snapshot yet -> nothing to reconcile against
+
+    adjustments: list[dict[str, Any]] = []
+    lot_symbols = [r["symbol"] for r in conn.execute("SELECT DISTINCT symbol FROM lots")]
+    for symbol in lot_symbols:
+        held = broker_qty.get(symbol, 0.0)
+        lots = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, qty FROM lots WHERE symbol=? ORDER BY opened_ts ASC, id ASC",
+                (symbol,),
+            )
+        ]
+        total = sum(l["qty"] for l in lots)
+        excess = total - held
+        if excess <= 1e-9:
+            continue
+        removed = 0.0
+        for lot in lots:
+            if excess <= 1e-9:
+                break
+            if lot["qty"] <= excess + 1e-9:
+                conn.execute("DELETE FROM lots WHERE id=?", (lot["id"],))
+                excess -= lot["qty"]
+                removed += lot["qty"]
+            else:
+                conn.execute("UPDATE lots SET qty=qty-? WHERE id=?", (excess, lot["id"]))
+                removed += excess
+                excess = 0.0
+        adjustments.append({"symbol": symbol, "removed_qty": removed, "broker_qty": held})
+    return adjustments
+
+
+def reconcile_lots_to_positions(path: str | Path) -> list[dict[str, Any]]:
+    """Public maintenance entry point for :func:`_reconcile_lots`. Returns the
+    adjustments made (empty if the lots already matched the broker)."""
+    with _connect(path) as conn:
+        return _reconcile_lots(conn)
 
 
 def init_db(path: str | Path, *, label: Optional[str] = None) -> None:
@@ -248,6 +312,10 @@ def replace_positions(
                 for p in positions
             ],
         )
+        # Self-heal: keep FIFO lots from ever claiming more shares than the broker
+        # actually holds. Safe here because this snapshot's positions were read
+        # after fills settled, so a just-bought lot is already reflected.
+        _reconcile_lots(conn)
 
 
 def insert_trade(
@@ -526,6 +594,18 @@ def get_summary(path: str | Path) -> dict[str, Any]:
     equity = last["equity"] if last else None
     start_equity = first["equity"] if first else None
 
+    # Authoritative total P&L is the actual account change (equity - start), which
+    # always reconciles with the broker. The realized/unrealized split is an
+    # estimate derived from our recorded trades; it can drift from the truth (fill
+    # prices vs the quotes we log, phantom lots, etc.), so surface that difference
+    # explicitly as a reconciliation line rather than letting it distort the total.
+    estimated_pnl = realized_total + unrealized_total
+    if equity is not None and start_equity is not None:
+        total_pnl = equity - start_equity
+    else:
+        total_pnl = estimated_pnl
+    reconciliation_pnl = total_pnl - estimated_pnl
+
     summary: dict[str, Any] = {
         "label": label_row["value"] if label_row else "Random Bot",
         "equity": equity,
@@ -540,7 +620,8 @@ def get_summary(path: str | Path) -> dict[str, Any]:
         # P&L
         "realized_pnl": realized_total,
         "unrealized_pnl": unrealized_total,
-        "total_pnl": realized_total + unrealized_total,
+        "total_pnl": total_pnl,
+        "reconciliation_pnl": reconciliation_pnl,
         "fees_total": fees_total or 0.0,
         # trade stats
         "n_wins": wins,
@@ -571,7 +652,7 @@ def get_summary(path: str | Path) -> dict[str, Any]:
     summary["period_returns"] = _period_returns(snapshots)
     if first and last and start_equity:
         summary["bot_return"] = equity / start_equity - 1.0
-        summary["total_pnl_pct"] = summary["total_pnl"] / start_equity
+        summary["total_pnl_pct"] = total_pnl / start_equity
         if first["spy_price"] and last["spy_price"]:
             summary["spy_return"] = last["spy_price"] / first["spy_price"] - 1.0
     else:

@@ -210,6 +210,17 @@ function renderSummary(s) {
   setColored("unrealized", s.unrealized_pnl == null ? "—" : fmtMoney(s.unrealized_pnl), s.unrealized_pnl);
   setColored("totalPnl", s.total_pnl == null ? "—" : fmtMoney(s.total_pnl), s.total_pnl);
 
+  // Reconciliation: only surface it when the estimate meaningfully diverges from
+  // the actual account change (> $1), so a clean book stays uncluttered.
+  const recon = s.reconciliation_pnl;
+  const reconCard = document.getElementById("reconcileCard");
+  if (recon != null && Math.abs(recon) > 1) {
+    setColored("reconcile", fmtMoney(recon), recon);
+    reconCard.hidden = false;
+  } else {
+    reconCard.hidden = true;
+  }
+
   document.getElementById("winRate").textContent =
     s.win_rate == null ? "—" : `${(s.win_rate * 100).toFixed(0)}% (${s.n_wins}/${s.n_wins + s.n_losses})`;
   document.getElementById("fees").textContent = s.fees_total == null ? "—" : fmtMoney(s.fees_total);
