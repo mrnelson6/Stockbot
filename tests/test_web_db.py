@@ -301,6 +301,31 @@ def test_total_pnl_anchored_to_actual_equity(tmp_path):
     assert s["total_pnl_pct"] == pytest.approx(0.029)
 
 
+def test_pnl_adjustment_clears_reconciliation(tmp_path):
+    # A one-time correcting entry folds into realized P&L so realized+unrealized
+    # ties back to the authoritative total, clearing the reconciliation line --
+    # without disturbing win/loss stats or the total itself.
+    p = tmp_path / "dash.db"
+    db.init_db(p)
+    db.insert_snapshot(p, equity=1000.0, cash=1000.0, spy_price=400.0, ts=1_000)
+    db.insert_snapshot(p, equity=1029.0, cash=29.0, spy_price=410.0, ts=2_000)
+    db.insert_trade(p, symbol="AAPL", side="BUY", qty=10, price=100.0, ts=1_100)
+    db.insert_trade(p, symbol="AAPL", side="SELL", qty=10, price=104.0, ts=1_200)
+    s = db.get_summary(p)
+    assert s["reconciliation_pnl"] == pytest.approx(-11.0)
+
+    db.post_pnl_adjustment(p, s["reconciliation_pnl"])
+    s2 = db.get_summary(p)
+    assert s2["realized_adjustment"] == pytest.approx(-11.0)
+    assert s2["realized_pnl"] == pytest.approx(29.0)          # 40 booked - 11 correction
+    assert s2["reconciliation_pnl"] == pytest.approx(0.0)     # books tie out
+    assert s2["total_pnl"] == pytest.approx(29.0)             # authoritative, unchanged
+    assert s2["n_wins"] == 1 and s2["n_losses"] == 0          # stats untouched
+
+    db.post_pnl_adjustment(p, -1.0)                            # additive, like a journal
+    assert db.get_summary(p)["realized_adjustment"] == pytest.approx(-12.0)
+
+
 def test_reconcile_drops_phantom_lot(tmp_path):
     # A recorded BUY the broker never ends up holding leaves a phantom open lot;
     # a later snapshot without that symbol must purge it. replace_positions runs

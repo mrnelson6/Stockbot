@@ -147,6 +147,29 @@ def _set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
     )
 
 
+def _get_meta(conn: sqlite3.Connection, key: str, default: Optional[str] = None) -> Optional[str]:
+    row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def post_pnl_adjustment(path: str | Path, amount: float) -> float:
+    """Book a one-time realized-P&L correcting entry and return the new running total.
+
+    Historical trades logged at quoted (not filled) prices, and exits with no
+    recorded sell, leave a permanent gap between the recorded realized+unrealized
+    estimate and the account's actual change (the reconciliation line). We can't
+    recompute those old fills, so this posts an explicit adjustment -- like an
+    accounting journal entry -- that folds into realized P&L so the books tie out.
+    Additive, so repeated entries accumulate; pass the current reconciliation gap
+    once to zero the card.
+    """
+    with _connect(path) as conn:
+        current = float(_get_meta(conn, "realized_adjustment", "0") or "0")
+        new_total = current + float(amount)
+        _set_meta(conn, "realized_adjustment", repr(new_total))
+        return new_total
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Add columns introduced after the first release to an existing DB."""
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(trades)")}
@@ -548,6 +571,7 @@ def get_summary(path: str | Path) -> dict[str, Any]:
         ).fetchone()
         n_positions = conn.execute("SELECT COUNT(*) AS n FROM positions").fetchone()["n"]
         n_trades = conn.execute("SELECT COUNT(*) AS n FROM trades").fetchone()["n"]
+        realized_adjustment = float(_get_meta(conn, "realized_adjustment", "0") or "0")
         fees_total = conn.execute(
             "SELECT COALESCE(SUM(fees), 0) AS f FROM trades WHERE side='SELL'"
         ).fetchone()["f"]
@@ -592,7 +616,9 @@ def get_summary(path: str | Path) -> dict[str, Any]:
     total_mv = sum(p["market_value"] for p in positions)
     largest_mv = max((p["market_value"] for p in positions), default=0.0)
 
-    realized_total = sum(realized_list)
+    # realized_list stays pure (from actual sells) so win/loss/streak stats are
+    # unaffected; the one-time correcting entry only folds into the P&L rollup.
+    realized_total = sum(realized_list) + realized_adjustment
     equity = last["equity"] if last else None
     start_equity = first["equity"] if first else None
 
@@ -621,6 +647,7 @@ def get_summary(path: str | Path) -> dict[str, Any]:
         "n_trades": n_trades,
         # P&L
         "realized_pnl": realized_total,
+        "realized_adjustment": realized_adjustment,
         "unrealized_pnl": unrealized_total,
         "total_pnl": total_pnl,
         "reconciliation_pnl": reconciliation_pnl,
