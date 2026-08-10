@@ -184,6 +184,57 @@ class TestPlanTrade:
         assert ia.buys == ib.buys
 
 
+class TestSingleTrade:
+    def test_buys_exactly_one_name_when_cash_available(self):
+        # Cash covers the floor -> a single-trade event places exactly one buy and
+        # no sells, respecting the per-position cap.
+        alloc = make_allocator(single_trade=True, min_buy=100.0, max_position_fraction=0.2)
+        holdings = {Symbol("AAPL"): 5}  # $500 held + $500 cash = $1000 account
+        for _ in range(30):
+            intent = alloc.plan_trade(holdings, PRICES, cash=500.0, universe=UNIVERSE)
+            assert len(intent.buys) == 1 and not intent.sells
+            (value,) = intent.buys.values()
+            assert 100.0 <= value <= 0.2 * 1000.0 + 1e-6   # >= floor, <= cap
+
+    def test_sells_exactly_one_name_when_cash_below_floor(self):
+        # Fully invested (cash under the floor) -> raise cash by selling one holding,
+        # no buys.
+        alloc = make_allocator(single_trade=True, min_buy=100.0)
+        holdings = {Symbol("AAPL"): 5, Symbol("MSFT"): 3, Symbol("JPM"): 2}
+        for _ in range(30):
+            intent = alloc.plan_trade(holdings, PRICES, cash=20.0, universe=UNIVERSE)
+            assert len(intent.sells) == 1 and not intent.buys
+            sym, qty = next(iter(intent.sells.items()))
+            assert sym in holdings and qty == holdings[sym]  # full exit
+
+    def test_alternates_sell_then_buy_when_fully_invested(self):
+        # Simulate the fully-invested oscillation: a sell frees cash, the next event
+        # deploys it -- one order each, never a multi-order burst.
+        alloc = make_allocator(single_trade=True, min_buy=100.0, deploy_fraction_range=(1.0, 1.0))
+        positions = {s: 2.0 for s in UNIVERSE[:5]}  # $1000 invested, $0 cash
+        cash = 0.0
+        sides = []
+        for _ in range(6):
+            intent = alloc.plan_trade(positions, PRICES, cash=cash, universe=UNIVERSE)
+            assert len(intent.sells) + len(intent.buys) == 1  # always one order
+            if intent.sells:
+                sym, qty = next(iter(intent.sells.items()))
+                cash += qty * PRICES[sym]
+                positions[sym] = positions.get(sym, 0.0) - qty
+                sides.append("S")
+            else:
+                sym, val = next(iter(intent.buys.items()))
+                cash -= val
+                positions[sym] = positions.get(sym, 0.0) + val / PRICES[sym]
+                sides.append("B")
+        assert "S" in sides and "B" in sides  # it both sells and buys over time
+
+    def test_holds_when_no_cash_and_no_holdings(self):
+        alloc = make_allocator(single_trade=True, min_buy=100.0)
+        intent = alloc.plan_trade({}, PRICES, cash=0.0, universe=UNIVERSE)
+        assert intent.is_empty
+
+
 class TestEdgeCases:
     def test_zero_cash_no_holdings_produces_no_buys(self):
         alloc = make_allocator()

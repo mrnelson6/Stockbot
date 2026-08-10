@@ -53,6 +53,7 @@ class RandomAllocator:
         deploy_fraction_range: tuple[float, float] = (0.9, 1.0),
         max_position_fraction: float = 0.2,
         min_buy: float = 0.0,
+        single_trade: bool = False,
         seed: int | None = None,
     ) -> None:
         """Initialize the allocator.
@@ -72,6 +73,13 @@ class RandomAllocator:
                 cash isn't fragmented into sub-floor dust. 0 (default) disables the
                 floor. Any leftover cash simply stays uninvested until a later event
                 can place it in a buy of at least ``min_buy``.
+            single_trade: If True, each trade event is a SINGLE order -- buy one name
+                when there's cash to clear ``min_buy``, otherwise sell one held name to
+                raise cash. On a fully-invested book this alternates sell/buy across
+                events. This decouples order count from the event rate, so the per-tick
+                ``trade_prob`` can stay high (frequent, evenly-spread events) while the
+                daily trade count stays low. The churn/Dirichlet multi-order behavior
+                is used only when this is False.
             seed: Optional RNG seed for reproducibility.
         """
         if not 0.0 <= trade_prob <= 1.0:
@@ -95,10 +103,17 @@ class RandomAllocator:
         self._deploy_low, self._deploy_high = low, high
         self._max_position_fraction = max_position_fraction
         self._min_buy = min_buy
+        self._single_trade = single_trade
         self._rng = np.random.default_rng(seed)
 
     def should_trade(self) -> bool:
-        """Per-tick gate: return True with probability ``trade_prob``."""
+        """Per-tick gate: return True with probability ``trade_prob``.
+
+        Memoryless, so the gaps between trade events are exponentially distributed
+        -- genuinely random spacing. Drought risk is governed purely by the rate:
+        P(no event for T ticks) = (1 - trade_prob)**T. Keep the rate high and pair
+        it with ``single_trade`` to keep the daily trade count low.
+        """
         return bool(self._rng.random() < self._trade_prob)
 
     def plan_trade(
@@ -120,6 +135,9 @@ class RandomAllocator:
             A :class:`TradeIntent`. Buy values are dollar targets, not shares; the
             executor converts to whole shares using live prices and buying power.
         """
+        if self._single_trade:
+            return self._plan_single(current_positions, prices, cash, universe)
+
         intent = TradeIntent()
 
         # 1. Random partial churn: each held position is fully sold with churn_sell_prob.
@@ -190,6 +208,48 @@ class RandomAllocator:
             if target_value >= self._min_buy and target_value > 0:
                 intent.buys[symbol] = target_value
 
+        return intent
+
+    def _plan_single(
+        self,
+        current_positions: dict[Symbol, int],
+        prices: dict[Symbol, float],
+        cash: float,
+        universe: list[Symbol],
+    ) -> TradeIntent:
+        """Plan a single-order trade event: one buy, or one sell.
+
+        Buy one random name when there's enough cash to clear the floor (bounded by
+        the per-position cap); otherwise sell one random held name to raise cash. On
+        a fully-invested account this naturally alternates sell -> buy -> sell across
+        events, one order at a time.
+        """
+        intent = TradeIntent()
+
+        account_value = max(0.0, cash) + sum(
+            shares * prices.get(symbol, 0.0) for symbol, shares in current_positions.items()
+        )
+        cap = self._max_position_fraction * account_value
+
+        # Enough cash to place a floor-sized buy? Deploy into one name.
+        if cash >= self._min_buy and cap >= self._min_buy:
+            candidates = [s for s in universe if prices.get(s, 0.0) > 0.0]
+            if not candidates:
+                return intent
+            deploy_fraction = float(self._rng.uniform(self._deploy_low, self._deploy_high))
+            # Target a random slice of cash, capped by the per-position limit, but
+            # never below the floor (we already know cash covers it).
+            budget = min(cash * deploy_fraction, cap)
+            budget = min(max(budget, self._min_buy), cash)
+            symbol = candidates[int(self._rng.integers(0, len(candidates)))]
+            intent.buys[symbol] = budget
+            return intent
+
+        # Not enough cash to buy -> sell one held name to raise some.
+        held = [(s, q) for s, q in current_positions.items() if q > 0 and prices.get(s, 0.0) > 0.0]
+        if held:
+            symbol, shares = held[int(self._rng.integers(0, len(held)))]
+            intent.sells[symbol] = shares
         return intent
 
     def _water_fill(

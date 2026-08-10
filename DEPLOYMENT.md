@@ -73,13 +73,16 @@ python scripts/random_portfolio.py \
     --record-db auto \
     --label "Random Bot" \
     --poll-interval 180 \
-    --trade-prob 0.01 \
+    --trade-prob 0.017 \
+    --single-trade \
     --min-buy 100
 ```
 
-`--trade-prob 0.01` with the 180s poll averages ~2 trades/day (raise it for a busier
-bot). `--min-buy 100` refuses to place any buy under $100 — cash too small to fund one
-is held until a later event can deploy it.
+`--single-trade` makes each trade event a single order (buy one name, or sell one to
+raise cash — it alternates on a fully-invested book). Because that decouples order
+count from the event rate, `--trade-prob 0.017` can keep events frequent (memoryless,
+so spacing is random with exponential gaps) while the daily count stays ~2 trades/day
+— no multi-day droughts. `--min-buy 100` refuses any buy under $100.
 
 Terminal 2 — the web server (bound to localhost; Caddy will expose it). With no `--db`
 it auto-selects the same account-derived file, so it follows `.env` automatically:
@@ -108,7 +111,7 @@ User=youruser
 WorkingDirectory=/home/youruser/stockbot
 ExecStart=/home/youruser/stockbot/.venv/bin/python scripts/random_portfolio.py \
     --execute --record-db auto \
-    --label "Random Bot" --poll-interval 180 --trade-prob 0.01 --min-buy 100
+    --label "Random Bot" --poll-interval 180 --trade-prob 0.017 --single-trade --min-buy 100
 Restart=on-failure
 RestartSec=10
 

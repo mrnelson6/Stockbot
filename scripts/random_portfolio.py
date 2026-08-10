@@ -550,11 +550,21 @@ def main() -> int:
     parser.add_argument(
         "--trade-prob",
         type=float,
-        default=0.01,
-        help="Per-tick probability of trading. At the default 180s poll this averages "
-        "~2 trades/day; raise it for a busier bot.",
+        default=0.017,
+        help="Per-tick probability of a trade event (memoryless, so inter-trade gaps "
+        "are exponential -- genuinely random spacing). With --single-trade and a 180s "
+        "poll this averages ~2 trades/day. Higher = more frequent, shorter gaps.",
     )
-    parser.add_argument("--churn-sell-prob", type=float, default=0.3, help="Per-holding sell probability per event")
+    parser.add_argument(
+        "--single-trade",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="One order per trade event: buy one name when cash allows, else sell one "
+        "to raise cash (alternates on a fully-invested book). Decouples order count "
+        "from event rate so a high trade-prob still yields a low daily trade count "
+        "without long droughts. --no-single-trade restores multi-order churn.",
+    )
+    parser.add_argument("--churn-sell-prob", type=float, default=0.3, help="Per-holding sell probability per event (multi-order mode only)")
     parser.add_argument("--min-buys", type=int, default=1)
     parser.add_argument("--max-buys", type=int, default=5)
     parser.add_argument(
@@ -637,6 +647,7 @@ def main() -> int:
         deploy_fraction_range=(args.deploy_min, args.deploy_max),
         max_position_fraction=args.max_position_pct,
         min_buy=args.min_buy,
+        single_trade=args.single_trade,
         seed=args.seed,
     )
 
